@@ -17,6 +17,7 @@
 #include "multifs.h"
 
 #include <string.h>
+#include <arpa/inet.h>
 
 /*
  * This is basically MurmurHash3 wrung through my own code readability

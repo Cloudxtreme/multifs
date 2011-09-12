@@ -23,6 +23,7 @@
 #include "multifs.h"
 #include "list.h"
 
+#include <alloca.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -35,6 +36,12 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+
+#ifdef HAVE_SYS_SELECT
+# include <sys/select.h>
+#else
+# include <sys/time.h>
+#endif
 
 /* length of an IPv6 address encoded as a string, plus terminating NUL character */
 #define MAX6ADDR	40
@@ -95,10 +102,10 @@ make_socket(int port)
 
 	/* set options */
 	opt = 1;
-#ifdef SO_REUSEPORT
+#if defined(SO_REUSEPORT)
 	if (setsockopt(mcastfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
 		err(1, "setsockopt(SO_REUSEPORT)");
-#elif HAVE_REUSEADDR_LIKE_REUSEPORT
+#elif defined(HAVE_REUSEADDR_LIKE_REUSEPORT)
 	if (setsockopt(mcastfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
 		err(1, "setsockopt(SO_REUSEADDR)");
 #endif
@@ -185,7 +192,7 @@ syslog_err(const char *str, size_t len, enum err err)
 	}
 
 	openlog(getprogname(), LOG_PID, LOG_DAEMON);
-	syslog(priority, "%*s\n", len, str);
+	syslog(priority, "%*s\n", (int) len, str);
 	closelog();
 }
 
@@ -682,7 +689,7 @@ net_init(struct multifs *multifs)
 		fd_set rfds;
 
 		/* wait for an event */
-		FD_COPY(&fds, &rfds);
+		rfds = fds;
 		n = select(nfds, &rfds, NULL, NULL, NULL);
 		if (n < 0)
 			warn("select");

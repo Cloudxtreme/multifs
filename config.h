@@ -19,6 +19,13 @@
 #define CONFIG_H
 
 /*
+ * It's like FreeBSD, except where it's not
+ */
+#if defined(__APPLE__)
+# define __FreeBSD__	10
+#endif
+
+/*
  * Wether sockaddr has an sa_len member
  */
 #if defined(__FreeBSD__) || \
@@ -54,6 +61,13 @@
  */
 #if defined(__linux__)
 # define HAVE_PROGRAM_INVOCATION_NAME
+#endif
+
+/*
+ * Wether we have <sys/select.h>
+ */
+#if defined(__linux__)
+# define HAVE_SYS_SELECT
 #endif
 
 #endif /* CONFIG_H */

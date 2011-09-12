@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
 
 #define swap8(x)	(x)
 #define swap16(x)	htons(x)

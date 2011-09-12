@@ -1,6 +1,6 @@
 VERSION		= 0.1
 CFLAGS		+= -g -Wall
-CPPFLAGS	+= -I/opt/local/include -D_FILE_OFFSET_BITS=64 -D__FreeBSD__=10 -DFUSE_USE_VERSION=26 -DVERSION=\"$(VERSION)\"
+CPPFLAGS	+= -I/opt/local/include -D_FILE_OFFSET_BITS=64 -D_XOPEN_SOURCE=500 -DFUSE_USE_VERSION=26 -DVERSION=\"$(VERSION)\"
 LDFLAGS		+= -L/opt/local/lib -lfuse
 
 all: multifs
