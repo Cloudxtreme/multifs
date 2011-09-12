@@ -1,0 +1,10 @@
+MultiFS MultiFS Distributing Multicast Filesystem
+=================================================
+
+MultiFS is an attempt at a filesystem that uses IPv6[1] multicast to
+distribute changes to files between nodes. Right now it's really more of a
+proof-of-concept.
+
+Footnotes:
+
+ 1. Sorry, no IPv4; get with the times, guys!
