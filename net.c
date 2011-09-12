@@ -264,7 +264,7 @@ mcast_send_process(struct net *net, struct packet *packet)
 	iov[1].iov_len = packet->len;
 
 	/* send the packet */
-	if (writev(net->mcastfd, iov, nitems(iov)))
+	if (writev(net->mcastfd, iov, nitems(iov)) < 0)
 		warn("mcast_send_process: writev");
 
 	/* place the packet on the list of sent packets, to be expunged at a

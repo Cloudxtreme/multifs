@@ -137,7 +137,7 @@ warn(const char *fmt, ...)
 	va_list ap;
 
 	va_start(ap, fmt);
-	output(-1, fmt, ap, ERR_WARN);
+	output(errno, fmt, ap, ERR_WARN);
 	va_end(ap);
 }
 
