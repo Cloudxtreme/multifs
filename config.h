@@ -23,6 +23,7 @@
  */
 #if defined(__APPLE__)
 # define __FreeBSD__	10
+# define _DARWIN_C_SOURCE
 #endif
 
 /*
