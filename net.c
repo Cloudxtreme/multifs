@@ -449,9 +449,8 @@ mcast_recv_dequeue(struct net *net)
 		packet = LIST_FIRST(&net->recvq);
 		LIST_REMOVE_FIRST(&net->recvq, packetq);
 
-		/* process the packet and release it */
+		/* process the packet */
 		mcast_recv_process(net, packet);
-		free(packet);
 	}
 }
 
