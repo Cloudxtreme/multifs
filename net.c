@@ -164,12 +164,6 @@ make_multicast(int mcastfd, const struct sockaddr_in6 *addr)
 {
 	struct ipv6_mreq mreq;
 
-	/* set it as the default destination */
-	if (connect(mcastfd, (const struct sockaddr *) addr, sizeof(*addr)) < 0) {
-		char buf[64];
-		err(1, "connect(%s)", inet_ntop(AF_INET6, &addr->sin6_addr, buf, sizeof(buf)));
-	}
-
 	/* join the multicast group */
 	mreq.ipv6mr_multiaddr = addr->sin6_addr;
 	mreq.ipv6mr_interface = 0;
@@ -255,6 +249,7 @@ mcast_send_process(struct net *net, struct packet *packet)
 {
 	char header[HEADERSZ];
 	struct iovec iov[2];
+	struct msghdr msghdr;
 
 	assert(pack(NULL, 0, "bbwq", NET_VERSION, 0, 0, (uint64_t) 0) == HEADERSZ);
 
@@ -265,9 +260,15 @@ mcast_send_process(struct net *net, struct packet *packet)
 	iov[1].iov_base = packet->buf;
 	iov[1].iov_len = packet->len;
 
+	memset(&msghdr, '\0', sizeof(msghdr));
+	msghdr.msg_name = &net->multicast;
+	msghdr.msg_namelen = sizeof(net->multicast);
+	msghdr.msg_iov = iov;
+	msghdr.msg_iovlen = nitems(iov);
+
 	/* send the packet */
-	if (writev(net->mcastfd, iov, nitems(iov)) < 0)
-		warn("mcast_send_process: writev");
+	if (sendmsg(net->mcastfd, &msghdr, 0) < 0)
+		warn("mcast_send_process: sendmsg");
 
 	/* place the packet on the list of sent packets, to be expunged at a
 	 * later moment */
@@ -474,12 +475,37 @@ mcast_recv(struct net *net)
 		warn("mcast_recv: ioctl(FIONREAD)");
 		return;
 	}
+
+	/* handle packets that are too small */
+	if (len < sizeof(header)) {
+		/* set up structures */
+		iov[0].iov_base = header;
+		iov[0].iov_len = sizeof(header);
+
+		memset(&msghdr, '\0', sizeof(msghdr));
+		msghdr.msg_name = &from;
+		msghdr.msg_namelen = sizeof(from);
+		msghdr.msg_iov = iov;
+		msghdr.msg_iovlen = 1;
+
+		/* receive */
+		if (recvmsg(net->mcastfd, &msghdr, 0) < 0) {
+			warn("mcast_recv: recvmsg");
+			goto out;
+		}
+
+		warnx("mcast_recv: packet too small (%d) from %s",
+		    len, net_addr(net, &from));
+		return;
+	}
+
 	len -= sizeof(header);
 
 	/* allocate memory for the packet */
-	packet = malloc(sizeof(*packet) - sizeof(packet->buf) + len);
+	packet = malloc((sizeof(*packet) - sizeof(packet->buf)) + len);
 	if (packet == NULL) {
-		warn("mcast_recv: malloc(%zu)", sizeof(*packet) - sizeof(packet->buf) + len);
+		warn("mcast_recv: malloc(%zu)",
+		    (sizeof(*packet) - sizeof(packet->buf)) + len);
 		return;
 	}
 
@@ -489,6 +515,7 @@ mcast_recv(struct net *net)
 	iov[1].iov_base = packet->buf;
 	iov[1].iov_len = len;
 
+	memset(&msghdr, '\0', sizeof(msghdr));
 	msghdr.msg_name = &from;
 	msghdr.msg_namelen = sizeof(from);
 	msghdr.msg_iov = iov;
@@ -504,7 +531,8 @@ mcast_recv(struct net *net)
 	memset(packet, '\0', sizeof(*packet) - sizeof(packet->buf));
 	packet->len = len;
 	packet->from = from.sin6_addr;
-	if (unpack(header, sizeof(header), "bbwq", &version, &packet->msg, &plen, &packet->sequence) < 0) {
+	if (unpack(header, sizeof(header), "bbwq",
+	    &version, &packet->msg, &plen, &packet->sequence) < 0) {
 		warn("mcast_recv: unpack");
 		goto out;
 	}
