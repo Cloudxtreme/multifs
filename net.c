@@ -464,12 +464,13 @@ mcast_recv_dequeue(struct net *net)
 static void
 mcast_recv(struct net *net)
 {
-	int len, version;
+	int len;
 	struct iovec iov[2];
 	struct msghdr msghdr;
 	char header[HEADERSZ];
 	struct packet *packet;
 	struct sockaddr_in6 from;
+	uint8_t version;
 	uint16_t plen;
 
 	/* get packet length */
