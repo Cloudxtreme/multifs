@@ -49,6 +49,15 @@
 /* size of the packet header */
 #define HEADERSZ	(1 + 1 + sizeof(uint16_t) + sizeof(uint64_t))
 
+/* token state */
+enum state {
+	STATE_ASKING_TOKEN,	/* we're searching or asking for the token */
+	STATE_STEALING_TOKEN,	/* we're stealing the token */
+	STATE_OWNER_KNOWN,	/* token owner is not us, but is known */
+	STATE_HAS_TOKEN,	/* we have the token */
+	STATE_WITHOUT_TIMEOUT	= STATE_OWNER_KNOWN
+};
+
 /* packet */
 struct packet {
 	LIST_ENTRY(, packet)	 packetq;	/* in-order linked list of messages */
@@ -65,6 +74,7 @@ struct net {
 	bool			 exit;
 	int			 mcastfd;
 	int			 fsfd;
+	enum state		 state;
 	uint64_t		 sequence;
 	struct sockaddr_in6	 multicast;
 	struct in6_addr		 self,
@@ -114,6 +124,9 @@ make_socket(int port)
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) < 0)
 		err(1, "setsockopt(IPV6_V6ONLY)");
 
+	opt = 0;
+	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &opt, sizeof(opt)) < 0)
+		err(1, "setsockopt(IPV6_MULTICAST_HOPS)");
 	opt = 255;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &opt, sizeof(opt)) < 0)
 		err(1, "setsockopt(IPV6_MULTICAST_HOPS)");
@@ -209,24 +222,6 @@ net_addr(struct net *net, const struct sockaddr_in6 *sin6)
 	return net->ipbuf;
 }
 
-/*
- * Determine if the owner of the token is known
- */
-static bool
-net_known_owner(const struct net *net)
-{
-	return memcmp(&net->owner, &in6_addr_any, sizeof(net->owner)) != 0;
-}
-
-/*
- * Determine if we're the owner of the token
- */
-static bool
-has_token(const struct net *net)
-{
-	return memcmp(&net->owner, &net->self, sizeof(net->owner)) == 0;
-}
-
 
 /***************************************************************************
  *** Sending multicast packets *********************************************
@@ -275,6 +270,9 @@ mcast_send_process(struct net *net, struct packet *packet)
 	LIST_INSERT_LAST(&net->sendq, packet, packetq);
 }
 
+static void
+mcast_send(struct net *net, enum msg msg, const char *fmt, ...);
+
 /*
  * Dequeue packets to be sent
  */
@@ -284,18 +282,25 @@ mcast_send_dequeue(struct net *net)
 	int i;
 	struct packet *packet;
 
-	/* do we have the token and packets to send */
-	if (!LIST_EMPTY(&net->waitq) && has_token(net)) {
-		/* don't hog the network too much, other hosts might want to
-		 * talk as well */
-		for (i = 0; i < 10 && !LIST_EMPTY(&net->waitq); i++) {
-			/* remove a packet from the list */
-			packet = LIST_FIRST(&net->waitq);
-			LIST_REMOVE_FIRST(&net->waitq, packetq);
+	/* do we have packets to send? */
+	if (!LIST_EMPTY(&net->waitq)) {
+		/* do we have the token? */
+		if (net->state == STATE_HAS_TOKEN) {
+			/* don't hog the network too much, other hosts might
+			 * want to talk as well */
+			for (i = 0; i < 10 && !LIST_EMPTY(&net->waitq); i++) {
+				/* remove a packet from the list */
+				packet = LIST_FIRST(&net->waitq);
+				LIST_REMOVE_FIRST(&net->waitq, packetq);
 
-			/* give it a sequence number and send it */
-			packet->sequence = ++net->sequence;
-			mcast_send_process(net, packet);
+				/* give it a sequence number and send it */
+				packet->sequence = ++net->sequence;
+				mcast_send_process(net, packet);
+			}
+		} else if (net->state == STATE_OWNER_KNOWN) {
+			/* ask for the token */
+			mcast_send(net, MSG_TOKEN_ASK, "");
+			net->state = STATE_ASKING_TOKEN;
 		}
 	}
 }
@@ -385,28 +390,36 @@ mcast_recv_process(struct net *net, struct packet *packet)
 	/* process the packet */
 	switch (packet->msg) {
 	case MSG_TOKEN_WHERE:
-		if (has_token(net))
+		if (net->state == STATE_HAS_TOKEN)
 			/* we have the token; tell the others so */
 			mcast_send(net, MSG_TOKEN_HERE, "");
 		break;
 
 	case MSG_TOKEN_HERE:
-		if (memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
+		/* did we become the owner? */
+		if (memcmp(&net->self, &packet->from, sizeof(net->self)) != 0) {
+			net->state = STATE_HAS_TOKEN;
+		} else if (memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
 			/* log spurious owner changes */
-			if (net_known_owner(net))
+			if (net->state == STATE_OWNER_KNOWN)
 				warnx("mcast_recv_process: spurious token owner change: %s -> %s",
 				    inet_ntop(AF_INET6, &net->owner, buf1, sizeof(buf1)),
 				    inet_ntop(AF_INET6, &packet->from, buf2, sizeof(buf2)));
 
 			/* record the new owner */
-			net->owner = packet->from;
+			net->state = STATE_OWNER_KNOWN;
 		}
+		net->owner = packet->from;
 		break;
 
 	case MSG_TOKEN_ASK:	/* somebody's requesting the token */
-		if (has_token(net)) {
+		if (net->state == STATE_HAS_TOKEN) {
 			/* we have the token, so grant it */
 			mcast_send(net, MSG_TOKEN_GIVE, "a", sizeof(packet->from), &packet->from);
+
+			/* record the new owner */
+			net->owner = packet->from;
+			net->state = STATE_OWNER_KNOWN;
 		}
 		break;
 
@@ -422,6 +435,8 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		/* get the new owner */
 		if (unpack(packet->buf, packet->len, "a", sizeof(net->owner), &net->owner) < 0)
 			warn("mcast_recv_process: unpack");
+		net->state = memcmp(&net->owner, &net->self, sizeof(net->owner)) == 0?
+		    STATE_HAS_TOKEN : STATE_OWNER_KNOWN;
 
 		break;
 
@@ -653,6 +668,38 @@ net_send(int netfd, enum msg msg, const char *fmt, ...)
 }
 
 
+
+/***************************************************************************
+ *** Timeout processing ****************************************************
+ ***************************************************************************/
+
+static void
+timeout(struct net *net)
+{
+	switch (net->state) {
+	case STATE_ASKING_TOKEN:
+		/* we can't find who has the token, so let's steal it */
+		mcast_send(net, MSG_TOKEN_HERE, "");
+		net->state = STATE_STEALING_TOKEN;
+		net->owner = net->self;
+		break;
+
+	case STATE_STEALING_TOKEN:
+		/* XXX there's likely a race condition here */
+		/* see if somebody else also stole the token */
+		if (memcmp(&net->self, &net->owner, sizeof(net->self)) == 0)
+			net->state = STATE_HAS_TOKEN;
+		else
+			net->state = STATE_OWNER_KNOWN;
+		break;
+
+	default:
+		/* no timeout processing necessary */
+		break;
+	}
+}
+
+
 /***************************************************************************
  *** Initialisation and main loop ******************************************
  ***************************************************************************/
@@ -714,6 +761,7 @@ net_init(struct multifs *multifs)
 		err_redirect(syslog_err);
 
 	/* try to find out who has the token */
+	net.state = STATE_ASKING_TOKEN;
 	mcast_send(&net, MSG_TOKEN_WHERE, "");
 
 	/* set up select */
@@ -726,20 +774,27 @@ net_init(struct multifs *multifs)
 	while (!net.exit) {
 		int n;
 		fd_set rfds;
+		struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
 
 		/* wait for an event */
 		rfds = fds;
-		n = select(nfds, &rfds, NULL, NULL, NULL);
+		n = select(nfds, &rfds, NULL, NULL,
+		    net.state >= STATE_WITHOUT_TIMEOUT? NULL : &tv);
 		if (n < 0)
 			warn("select");
 
-		/* handle changes from the fuse worker(s) */
-		if (FD_ISSET(net.fsfd, &rfds))
-			fs_recv(&net);
+		/* handle timeouts */
+		if (n == 0) {
+			timeout(&net);
+		} else {
+			/* handle changes from the fuse worker(s) */
+			if (FD_ISSET(net.fsfd, &rfds))
+				fs_recv(&net);
 
-		/* handle incoming packets */
-		if (FD_ISSET(net.mcastfd, &rfds))
-			mcast_recv(&net);
+			/* handle incoming packets */
+			if (FD_ISSET(net.mcastfd, &rfds))
+				mcast_recv(&net);
+		}
 
 		/* process the incoming packet queue */
 		mcast_recv_dequeue(&net);
