@@ -328,7 +328,7 @@ mcast_send(struct net *net, enum msg msg, const char *fmt, ...)
 	}
 
 	/* initialise the packet */
-	memset(packet, '\0', sizeof(*packet) - sizeof(packet->buf));
+	memset(packet, '\0', offsetof(struct packet, buf));
 	packet->msg = msg;
 	packet->len = len;
 
@@ -396,19 +396,16 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		break;
 
 	case MSG_TOKEN_HERE:
-		/* did we become the owner? */
-		if (memcmp(&net->self, &packet->from, sizeof(net->self)) != 0) {
-			net->state = STATE_HAS_TOKEN;
-		} else if (memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
+		if (memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
 			/* log spurious owner changes */
 			if (net->state == STATE_OWNER_KNOWN)
 				warnx("mcast_recv_process: spurious token owner change: %s -> %s",
 				    inet_ntop(AF_INET6, &net->owner, buf1, sizeof(buf1)),
 				    inet_ntop(AF_INET6, &packet->from, buf2, sizeof(buf2)));
-
-			/* record the new owner */
-			net->state = STATE_OWNER_KNOWN;
 		}
+
+		/* record the new owner */
+		net->state = STATE_OWNER_KNOWN;
 		net->owner = packet->from;
 		break;
 
@@ -424,14 +421,6 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		break;
 
 	case MSG_TOKEN_GIVE:	/* token was granted to another owner */
-		if (memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
-			/* sanity check */
-			warnx("mcast_recv_process: MSG_TOKEN_GIVE from %s, not owner %s",
-			    inet_ntop(AF_INET6, &packet->from, buf1, sizeof(buf1)),
-			    inet_ntop(AF_INET6, &net->owner, buf1, sizeof(buf1)));
-			break;
-		}
-
 		/* get the new owner */
 		if (unpack(packet->buf, packet->len, "a", sizeof(net->owner), &net->owner) < 0)
 			warn("mcast_recv_process: unpack");
@@ -524,6 +513,7 @@ mcast_recv(struct net *net)
 	}
 
 	/* set up structures */
+	memset(header, '\0', sizeof(header));
 	iov[0].iov_base = header;
 	iov[0].iov_len = sizeof(header);
 	iov[1].iov_base = packet->buf;
@@ -542,7 +532,7 @@ mcast_recv(struct net *net)
 	}
 
 	/* initialise the packet and parse the header */
-	memset(packet, '\0', sizeof(*packet) - sizeof(packet->buf));
+	memset(packet, '\0', offsetof(struct packet, buf));
 	packet->len = len;
 	packet->from = from.sin6_addr;
 	if (unpack(header, sizeof(header), "bbwq",
@@ -558,12 +548,15 @@ mcast_recv(struct net *net)
 		goto out;
 	}
 
-	/* check for truncated packets */
-	if (plen != len) {
+	/* check for truncated packets and correct the packet length; this
+	 * works around broken FIONREAD implementations (I'm looking at you,
+	 * FreeBSD & Mac OS X) */
+	if (packet->len < plen) {
 		warnx("mcast_recv: truncated packet (got %d, expected %d)",
 		    len, plen);
 		goto out;
 	}
+	packet->len = plen;
 
 	/* must this packet be processed in-sequence? */
 	if (packet->msg >= MSG_WITH_SEQUENCE) {
@@ -613,7 +606,7 @@ fs_recv(struct net *net)
 	}
 
 	/* initialise the packet */
-	memset(packet, '\0', sizeof(*packet) - sizeof(packet->buf));
+	memset(packet, '\0', offsetof(struct packet, buf));
 	packet->len = len;
 
 	/* set up structures */
