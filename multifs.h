@@ -18,8 +18,9 @@
 #ifndef MULTIFS_H
 #define MULTIFS_H
 
-#include "config.h"
+#include "compat.h"
 
+#include <assert.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -27,27 +28,9 @@
 #include <sys/param.h>
 #include <sys/types.h>
 
-#if BYTE_ORDER == LITTLE_ENDIAN
-# define htonll(x)		(((uint64_t) htonl(x) << 32LL) | (uint64_t) htonl((x) >> 32LL))
-# define ntohll(x)		htonll(x)
-#else
-# define htonll(x)		(x)
-# define ntohll(x)		(x)
-#endif
-
 #define nitems(arr)		(sizeof(arr) / sizeof((arr)[0]))
 #define min(a, b)		((a) < (b)? (a) : (b))
 #define max(a, b)		((a) < (b)? (b) : (a))
-
-#if __STDC_VERSION__ < 199901L
-# define restrict
-#endif
-
-#ifdef __GNUC__
-# define noreturn	__attribute__ ((noreturn))
-#else
-# define noreturn
-#endif
 
 /* protocol version */
 #define NET_VERSION	1
@@ -145,10 +128,5 @@ noreturn void	 verr(int, const char *, va_list);
 noreturn void	 err(int, const char *, ...);
 noreturn void	 verrx(int, const char *, va_list);
 noreturn void	 errx(int, const char *, ...);
-
-/* compat.c */
-#ifndef HAVE_GETPROGNAME
-const char	*getprogname(void);
-#endif /* HAVE_GETPROGNAME */
 
 #endif /* MULTIFS_H */
