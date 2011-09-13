@@ -35,8 +35,8 @@
 #define PACK(bits, val)                                                     \
 	do {                                                                \
 		uint ## bits ## _t tmp;                                     \
+		tmp = (val);                                                \
 		if (p + sizeof(tmp) <= end) {                               \
-			tmp = (val);                                        \
 			tmp = swap ## bits(tmp);                            \
 			memcpy(p, &tmp, sizeof(tmp));                       \
 		}                                                           \
@@ -145,11 +145,10 @@ pack(char *const buf, const size_t len, const char *fmt, ...)
 
 #define UNPACK(bits, val)                                                   \
 	do {                                                                \
-		uint ## bits ## _t tmp;                                     \
-		if (p + sizeof(tmp) <= end) {                               \
+		uint ## bits ## _t tmp = 0;                                 \
+		if (p + sizeof(tmp) <= end)                                 \
 			memcpy(&tmp, p, sizeof(tmp));                       \
-			(val) = swap ## bits(tmp);                          \
-		}                                                           \
+		(val) = swap ## bits(tmp);                                  \
 		p += sizeof(tmp);                                           \
 	} while (0)
 
@@ -179,10 +178,8 @@ vunpack(const char *const buf, const size_t len, const char *fmt, va_list ap)
 			s = va_arg(ap, char *);
 
 			/* determine string length */
-			i = 0;
 			UNPACK(8, i);
 			if (i & 0x80) {
-				i = 0;
 				p -= sizeof(uint8_t);
 				UNPACK(16, i);
 				i &= ~(1 << 15);
