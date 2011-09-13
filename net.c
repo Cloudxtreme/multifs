@@ -47,7 +47,7 @@
 #define MAX6ADDR	40
 
 /* size of the packet header */
-#define HEADERSZ	(1 + 1 + sizeof(uint64_t))
+#define HEADERSZ	(1 + 1 + sizeof(uint16_t) + sizeof(uint64_t))
 
 /* packet */
 struct packet {
@@ -256,10 +256,12 @@ mcast_send_process(struct net *net, struct packet *packet)
 	char header[HEADERSZ];
 	struct iovec iov[2];
 
+	assert(pack(NULL, 0, "bbwq", NET_VERSION, 0, 0, (uint64_t) 0) == HEADERSZ);
+
 	/* create the header */
 	iov[0].iov_base = header;
-	iov[0].iov_len = pack(header, sizeof(header), "bbq",
-	    NET_VERSION, packet->msg, packet->sequence);
+	iov[0].iov_len = pack(header, sizeof(header), "bbwq",
+	    NET_VERSION, packet->msg, (int) packet->len, packet->sequence);
 	iov[1].iov_base = packet->buf;
 	iov[1].iov_len = packet->len;
 
@@ -464,6 +466,7 @@ mcast_recv(struct net *net)
 	char header[HEADERSZ];
 	struct packet *packet;
 	struct sockaddr_in6 from;
+	uint16_t plen;
 
 	/* get packet length */
 	len = 0;
@@ -471,6 +474,7 @@ mcast_recv(struct net *net)
 		warn("mcast_recv: ioctl(FIONREAD)");
 		return;
 	}
+	len -= sizeof(header);
 
 	/* allocate memory for the packet */
 	packet = malloc(sizeof(*packet) - sizeof(packet->buf) + len);
@@ -500,7 +504,7 @@ mcast_recv(struct net *net)
 	memset(packet, '\0', sizeof(*packet) - sizeof(packet->buf));
 	packet->len = len;
 	packet->from = from.sin6_addr;
-	if (unpack(header, sizeof(header), "bbq", &version, &packet->msg, &packet->sequence) < 0) {
+	if (unpack(header, sizeof(header), "bbwq", &version, &packet->msg, &plen, &packet->sequence) < 0) {
 		warn("mcast_recv: unpack");
 		goto out;
 	}
@@ -509,6 +513,13 @@ mcast_recv(struct net *net)
 	if (version != NET_VERSION) {
 		warnx("mcast_recv: bad version %d from %s", version,
 		    net_addr(net, &from));
+		goto out;
+	}
+
+	/* check for truncated packets */
+	if (plen != len) {
+		warnx("mcast_recv: truncated packet (got %d, expected %d)",
+		    len, plen);
 		goto out;
 	}
 
@@ -672,7 +683,8 @@ net_init(struct multifs *multifs)
 	signal(SIGPIPE, SIG_DFL);
 
 	/* redirect everything from now to syslog */
-	err_redirect(syslog_err);
+	if (!multifs->debug)
+		err_redirect(syslog_err);
 
 	/* try to find out who has the token */
 	mcast_send(&net, MSG_TOKEN_WHERE, "");
