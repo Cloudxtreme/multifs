@@ -21,10 +21,9 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <arpa/inet.h>
 
-#define be8put(p, x)	(*(uint8_t *) p = (x))
-#define be8get(p)	(*(const uint8_t *) p)
+#define be8get(p)	(*(const uint8_t *) (p))
+#define be8put(p, v)	(*(uint8_t *) (p) = (v))
 
 /***************************************************************************
  *** Pack ******************************************************************
@@ -96,18 +95,37 @@ vpack(char *const buf, const size_t len, const char *fmt, va_list ap)
 			break;
 		}
 
-		case 'a': {	/* byte array */
+		case '*': {	/* array */
 			size_t l;
-			const uint8_t *b;
+			const void *b;
+			int stride;
+
+			/* determine stride (element size) */
+			switch (*(fmt++)) {
+			case 'b': stride = sizeof(uint8_t); break;
+			case 'w': stride = sizeof(uint16_t); break;
+			case 'd': stride = sizeof(uint32_t); break;
+			case 'q': stride = sizeof(uint64_t); break;
+			default:
+				errno = EINVAL;
+				return -1;
+			}
 
 			/* get the size and pointer */
 			l = va_arg(ap, size_t);
-			b = va_arg(ap, const uint8_t *);
+			b = va_arg(ap, const void *);
 
-			/* output it */
-			if (p + l <= end)
-				memcpy(p, b, l);
-			p += l;
+			/* perform the copy */
+			if (p + l * stride <= end) {
+				switch (stride) {
+				case sizeof(uint8_t):  memcpy(p, b, l);  break;
+				case sizeof(uint16_t): mbe16put(p, b, l); break;
+				case sizeof(uint32_t): mbe32put(p, b, l); break;
+				case sizeof(uint64_t): mbe64put(p, b, l); break;
+				}
+			}
+
+			p += l * stride;
 
 			break;
 		}
@@ -214,18 +232,37 @@ vunpack(const char *const buf, const size_t len, const char *fmt, va_list ap)
 			break;
 		}
 
-		case 'a': {	/* byte array */
+		case '*': {	/* array */
 			size_t l;
-			uint8_t *b;
+			void *b;
+			int stride;
+
+			/* determine stride (element size) */
+			switch (*(fmt++)) {
+			case 'b': stride = sizeof(uint8_t); break;
+			case 'w': stride = sizeof(uint16_t); break;
+			case 'd': stride = sizeof(uint32_t); break;
+			case 'q': stride = sizeof(uint64_t); break;
+			default:
+				errno = EINVAL;
+				return -1;
+			}
 
 			/* get the size and pointer */
 			l = va_arg(ap, size_t);
-			b = va_arg(ap, uint8_t *);
+			b = va_arg(ap, void *);
 
-			/* get it */
-			if (p + l <= end)
-				memcpy(b, p, l);
-			p += l;
+			/* perform the copy */
+			if (p + l * stride <= end) {
+				switch (stride) {
+				case sizeof(uint8_t):  memcpy(b, p, l);  break;
+				case sizeof(uint16_t): mbe16get(b, p, l); break;
+				case sizeof(uint32_t): mbe32get(b, p, l); break;
+				case sizeof(uint64_t): mbe64get(b, p, l); break;
+				}
+			}
+
+			p += l * stride;
 
 			break;
 		}

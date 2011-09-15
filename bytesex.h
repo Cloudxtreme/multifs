@@ -53,6 +53,9 @@
 # define bswap64	__bswap_64
 #endif
 
+/*
+ * Provide {be,le}toh{16,32,64} and hto{be,le}{16,32,64}
+ */
 #if BYTE_ORDER == BIG_ENDIAN
 # if !defined(betoh16)
 #  define betoh16(x)	(x)
@@ -91,6 +94,9 @@
 # endif
 #endif
 
+/*
+ * Provide ntoh{16,32,64} and hton{16,32,64}
+ */
 #if !defined(ntoh16)
 # define ntoh16		betoh16
 # define ntoh32		betoh32
@@ -100,6 +106,9 @@
 # define hton64		htobe64
 #endif
 
+/*
+ * Provide {be,le}{16,32,64}{get,put}
+ */
 #ifndef be16get
 static inline uint16_t
 be16get(const void *ptr)
@@ -190,6 +199,181 @@ le64put(void *ptr, uint64_t val)
 	le32put(ptr, val);
 	le32put(ptr + sizeof(uint32_t), val >> 32);
 }
+#endif
+
+/*
+ * Provide m{be,le}{16,32,64}{get,put}
+ */
+#if BYTE_ORDER == BIG_ENDIAN
+# define mbe16get(d, s, l)	memcpy(d, s, (l) * sizeof(uint16_t))
+# define mbe16put(d, s, l)	memcpy(d, s, (l) * sizeof(uint16_t))
+# define mbe32get(d, s, l)	memcpy(d, s, (l) * sizeof(uint32_t))
+# define mbe32put(d, s, l)	memcpy(d, s, (l) * sizeof(uint32_t))
+# define mbe64get(d, s, l)	memcpy(d, s, (l) * sizeof(uint64_t))
+# define mbe64put(d, s, l)	memcpy(d, s, (l) * sizeof(uint64_t))
+
+static inline void *
+mle16get(uint16_t *dest, const void *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		*(dest++) = le16get(src);
+		src = (const uint16_t *) src + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mle16put(void *dest, const uint16_t *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		le16put(dest, *(src++));
+		dest = (uint16_t *) dest + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mle32get(uint32_t *dest, const void *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		*(dest++) = le32get(src);
+		src = (const uint32_t *) src + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mle32put(void *dest, const uint32_t *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		le32put(dest, *(src++));
+		dest = (uint32_t *) dest + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mle64get(uint64_t *dest, const void *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		*(dest++) = le64get(src);
+		src = (const uint64_t *) src + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mle64put(void *dest, const uint64_t *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		le64put(dest, *(src++));
+		dest = (uint64_t *) dest + 1;
+	}
+
+	return p;
+}
+#else
+static inline void *
+mbe16get(uint16_t *dest, const void *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		*(dest++) = be16get(src);
+		src = (const uint16_t *) src + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mbe16put(void *dest, const uint16_t *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		be16put(dest, *(src++));
+		dest = (uint16_t *) dest + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mbe32get(uint32_t *dest, const void *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		*(dest++) = be32get(src);
+		src = (const uint32_t *) src + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mbe32put(void *dest, const uint32_t *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		be32put(dest, *(src++));
+		dest = (uint32_t *) dest + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mbe64get(uint64_t *dest, const void *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		*(dest++) = be64get(src);
+		src = (const uint64_t *) src + 1;
+	}
+
+	return p;
+}
+
+static inline void *
+mbe64put(void *dest, const uint64_t *src, size_t len)
+{
+	void *p = dest;
+
+	while (len-- > 0) {
+		be64put(dest, *(src++));
+		dest = (uint64_t *) dest + 1;
+	}
+
+	return p;
+}
+
+# define mle16get(d, s, l)	memcpy(d, s, (l) * sizeof(uint16_t))
+# define mle16put(d, s, l)	memcpy(d, s, (l) * sizeof(uint16_t))
+# define mle32get(d, s, l)	memcpy(d, s, (l) * sizeof(uint32_t))
+# define mle32put(d, s, l)	memcpy(d, s, (l) * sizeof(uint32_t))
+# define mle64get(d, s, l)	memcpy(d, s, (l) * sizeof(uint64_t))
+# define mle64put(d, s, l)	memcpy(d, s, (l) * sizeof(uint64_t))
 #endif
 
 #endif /* BYTESEX_H */

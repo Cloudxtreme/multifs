@@ -121,7 +121,7 @@ multifs_write(const char *path, const char *buf, size_t size, off_t offset,
 	/* transmit the write in chunks */
 	for (i = 0; i < size; i += CHUNKSZ) {
 		s = min(CHUNKSZ, size - i);
-		net_send(multifs->netfd, MSG_FILE_WRITE, "sqa", strlen(path), path,
+		net_send(multifs->netfd, MSG_FILE_WRITE, "sq*b", strlen(path), path,
 		    (uint64_t) offset + i, s, buf + i);
 	}
 

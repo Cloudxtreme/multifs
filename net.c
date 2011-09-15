@@ -413,7 +413,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 	case MSG_TOKEN_ASK:	/* somebody's requesting the token */
 		if (net->state == STATE_HAS_TOKEN) {
 			/* we have the token, so grant it */
-			mcast_send(net, MSG_TOKEN_GIVE, "a", sizeof(packet->from), &packet->from);
+			mcast_send(net, MSG_TOKEN_GIVE, "*b", sizeof(packet->from), &packet->from);
 
 			/* record the new owner */
 			net->owner = packet->from;
@@ -423,7 +423,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 
 	case MSG_TOKEN_GIVE:	/* token was granted to another owner */
 		/* get the new owner */
-		if (unpack(packet->buf, packet->len, "a", sizeof(net->owner), &net->owner) < 0)
+		if (unpack(packet->buf, packet->len, "*b", sizeof(net->owner), &net->owner) < 0)
 			warn("mcast_recv_process: unpack");
 		net->state = memcmp(&net->owner, &net->self, sizeof(net->owner)) == 0?
 		    STATE_HAS_TOKEN : STATE_OWNER_KNOWN;
