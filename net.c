@@ -22,6 +22,7 @@
 
 #include "multifs.h"
 #include "list.h"
+#include "bytesex.h"
 
 #include <alloca.h>
 #include <errno.h>
@@ -154,8 +155,8 @@ make_addr(const char *restrict name, size_t namelen, int port, struct sockaddr_i
 
 	/* hash the name */
 	h = hash((const uint8_t *) name, namelen, port);
-	h.low = htonll(h.low);
-	h.high = htonll(h.high);
+	h.low = hton64(h.low);
+	h.high = hton64(h.high);
 
 	/* determine the address */
 	memset(sin6, '\0', sizeof(*sin6));

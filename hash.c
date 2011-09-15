@@ -15,6 +15,7 @@
  */
 
 #include "multifs.h"
+#include "bytesex.h"
 
 #include <string.h>
 #include <arpa/inet.h>
@@ -36,11 +37,8 @@ fetch(const uint8_t *buf)
 {
 	hashval_t val;
 
-	memcpy(&val.high, buf, sizeof(val.high));
-	memcpy(&val.low, buf + sizeof(val.high), sizeof(val.low));
-
-	val.high = ntohll(val.high);
-	val.low = ntohll(val.low);
+	val.high = be64get(buf);
+	val.low = be64get(buf + sizeof(uint64_t));
 
 	return val;
 }

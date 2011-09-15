@@ -93,15 +93,4 @@
 const char	*getprogname(void);
 #endif /* HAVE_GETPROGNAME */
 
-/*
- * Endianness conversion on long long (64-bit)
- */
-#if BYTE_ORDER == LITTLE_ENDIAN
-# define htonll(x)		(((uint64_t) htonl(x) << 32LL) | (uint64_t) htonl((x) >> 32LL))
-# define ntohll(x)		htonll(x)
-#else
-# define htonll(x)		(x)
-# define ntohll(x)		(x)
-#endif
-
 #endif /* COMPAT_H */

@@ -16,17 +16,15 @@
  */
 
 #include "multifs.h"
+#include "bytesex.h"
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 
-#define swap8(x)	(x)
-#define swap16(x)	htons(x)
-#define swap32(x)	htonl(x)
-#define swap64(x)	htonll(x)
-
+#define be8put(p, x)	(*(uint8_t *) p = (x))
+#define be8get(p)	(*(const uint8_t *) p)
 
 /***************************************************************************
  *** Pack ******************************************************************
@@ -36,10 +34,8 @@
 	do {                                                                \
 		uint ## bits ## _t tmp;                                     \
 		tmp = (val);                                                \
-		if (p + sizeof(tmp) <= end) {                               \
-			tmp = swap ## bits(tmp);                            \
-			memcpy(p, &tmp, sizeof(tmp));                       \
-		}                                                           \
+		if (p + sizeof(tmp) <= end)                                 \
+			be ## bits ## put(p, tmp);                          \
 		p += sizeof(tmp);                                           \
 	} while (0)
 
@@ -147,8 +143,8 @@ pack(char *const buf, const size_t len, const char *fmt, ...)
 	do {                                                                \
 		uint ## bits ## _t tmp = 0;                                 \
 		if (p + sizeof(tmp) <= end)                                 \
-			memcpy(&tmp, p, sizeof(tmp));                       \
-		(val) = swap ## bits(tmp);                                  \
+			tmp = be ## bits ## get(p);                         \
+		(val) = tmp;                                                \
 		p += sizeof(tmp);                                           \
 	} while (0)
 
