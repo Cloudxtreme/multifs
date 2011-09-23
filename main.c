@@ -48,10 +48,11 @@ multifs_opts[] = {
  * Display a friendly usage message
  */
 noreturn static void
-usage()
+usage(void)
 {
-	struct fuse_args args = { 0 };
+	struct fuse_args args;
 
+	memset(&args, '\0', sizeof(args));
 	fprintf(stderr,
 		"usage: %s name datadir mountpoint [options]\n"
 		"\n"
