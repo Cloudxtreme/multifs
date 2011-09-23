@@ -291,7 +291,7 @@ mcast_send_dequeue(struct net *net)
 			 * want to talk as well */
 			for (i = 0; i < 10 && !LIST_EMPTY(&net->waitq); i++) {
 				/* remove a packet from the list */
-				packet = LIST_FIRST(&net->waitq);
+				packet = LIST_FIRST(&net->waitq, packetq);
 				LIST_REMOVE_FIRST(&net->waitq, packetq);
 
 				/* give it a sequence number and send it */
@@ -448,10 +448,10 @@ mcast_recv_dequeue(struct net *net)
 	struct packet *packet;
 
 	/* process all packets that are in-order wrt. the sequence */
-	while (LIST_FIRST(&net->recvq) != NULL &&
-	    LIST_FIRST(&net->recvq)->sequence == net->sequence + 1) {
+	while (LIST_FIRST(&net->recvq, packetq) != NULL &&
+	    LIST_FIRST(&net->recvq, packetq)->sequence == net->sequence + 1) {
 		/* take off the packet */
-		packet = LIST_FIRST(&net->recvq);
+		packet = LIST_FIRST(&net->recvq, packetq);
 		LIST_REMOVE_FIRST(&net->recvq, packetq);
 
 		/* process the packet */
