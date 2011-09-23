@@ -52,11 +52,12 @@
 
 /* token state */
 enum state {
-	STATE_ASKING_TOKEN,	/* we're searching or asking for the token */
-	STATE_STEALING_TOKEN,	/* we're stealing the token */
-	STATE_OWNER_KNOWN,	/* token owner is not us, but is known */
+	STATE_SEARCHING_TOKEN,	/* we're searching for the token */
+	STATE_SEARCHING_TOKEN2,	/* still searching */
+	STATE_ASKING_TOKEN,	/* we're asking for the token */
+	STATE_FOUND_TOKEN,	/* we know where the token is */
 	STATE_HAS_TOKEN,	/* we have the token */
-	STATE_WITHOUT_TIMEOUT	= STATE_OWNER_KNOWN
+	STATE_WITHOUT_TIMEOUT	= STATE_FOUND_TOKEN
 };
 
 /* packet */
@@ -298,10 +299,10 @@ mcast_send_dequeue(struct net *net)
 				packet->sequence = ++net->sequence;
 				mcast_send_process(net, packet);
 			}
-		} else if (net->state == STATE_OWNER_KNOWN) {
+		} else if (net->state == STATE_FOUND_TOKEN) {
 			/* ask for the token */
-			mcast_send(net, MSG_TOKEN_ASK, "");
 			net->state = STATE_ASKING_TOKEN;
+			mcast_send(net, MSG_TOKEN_ASK, "");
 		}
 	}
 }
@@ -399,34 +400,36 @@ mcast_recv_process(struct net *net, struct packet *packet)
 	case MSG_TOKEN_HERE:
 		if (memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
 			/* log spurious owner changes */
-			if (net->state == STATE_OWNER_KNOWN)
+			if (net->state == STATE_FOUND_TOKEN)
 				warnx("mcast_recv_process: spurious token owner change: %s -> %s",
 				    inet_ntop(AF_INET6, &net->owner, buf1, sizeof(buf1)),
 				    inet_ntop(AF_INET6, &packet->from, buf2, sizeof(buf2)));
 		}
 
 		/* record the new owner */
-		net->state = STATE_OWNER_KNOWN;
+		net->state = STATE_FOUND_TOKEN;
 		net->owner = packet->from;
 		break;
 
 	case MSG_TOKEN_ASK:	/* somebody's requesting the token */
 		if (net->state == STATE_HAS_TOKEN) {
 			/* we have the token, so grant it */
-			mcast_send(net, MSG_TOKEN_GIVE, "*b", sizeof(packet->from), &packet->from);
+			mcast_send(net, MSG_TOKEN_GIVE, "*b",
+			    sizeof(packet->from), &packet->from);
 
 			/* record the new owner */
 			net->owner = packet->from;
-			net->state = STATE_OWNER_KNOWN;
+			net->state = STATE_FOUND_TOKEN;
 		}
 		break;
 
 	case MSG_TOKEN_GIVE:	/* token was granted to another owner */
 		/* get the new owner */
-		if (unpack(packet->buf, packet->len, "*b", sizeof(net->owner), &net->owner) < 0)
+		if (unpack(packet->buf, packet->len, "*b",
+		    sizeof(net->owner), &net->owner) < 0)
 			warn("mcast_recv_process: unpack");
 		net->state = memcmp(&net->owner, &net->self, sizeof(net->owner)) == 0?
-		    STATE_HAS_TOKEN : STATE_OWNER_KNOWN;
+		    STATE_HAS_TOKEN : STATE_FOUND_TOKEN;
 
 		break;
 
@@ -465,7 +468,7 @@ mcast_recv_dequeue(struct net *net)
 static void
 mcast_recv(struct net *net)
 {
-	int len;
+	unsigned int len;
 	struct iovec iov[2];
 	struct msghdr msghdr;
 	char header[HEADERSZ];
@@ -663,7 +666,6 @@ net_send(int netfd, enum msg msg, const char *fmt, ...)
 }
 
 
-
 /***************************************************************************
  *** Timeout processing ****************************************************
  ***************************************************************************/
@@ -672,20 +674,22 @@ static void
 timeout(struct net *net)
 {
 	switch (net->state) {
-	case STATE_ASKING_TOKEN:
-		/* we can't find who has the token, so let's steal it */
+	case STATE_SEARCHING_TOKEN2:
+		/* nobody responded on our request, so unilaterally declare
+		 * that we have the token (ie. steal it) */
 		mcast_send(net, MSG_TOKEN_HERE, "");
-		net->state = STATE_STEALING_TOKEN;
+		net->state = STATE_HAS_TOKEN;
 		net->owner = net->self;
 		break;
 
-	case STATE_STEALING_TOKEN:
-		/* XXX there's likely a race condition here */
-		/* see if somebody else also stole the token */
-		if (memcmp(&net->self, &net->owner, sizeof(net->self)) == 0)
-			net->state = STATE_HAS_TOKEN;
+	case STATE_SEARCHING_TOKEN:
+	case STATE_ASKING_TOKEN:
+		/* no response for our token request, search for it */
+		mcast_send(net, MSG_TOKEN_WHERE, "");
+		if (net->state == STATE_SEARCHING_TOKEN)
+			net->state = STATE_SEARCHING_TOKEN2;
 		else
-			net->state = STATE_OWNER_KNOWN;
+			net->state = STATE_SEARCHING_TOKEN;
 		break;
 
 	default:
@@ -756,14 +760,14 @@ net_init(struct multifs *multifs)
 		err_redirect(syslog_err);
 
 	/* try to find out who has the token */
-	net.state = STATE_ASKING_TOKEN;
+	net.state = STATE_SEARCHING_TOKEN;
 	mcast_send(&net, MSG_TOKEN_WHERE, "");
 
 	/* set up select */
 	FD_ZERO(&fds);
 	FD_SET(net.fsfd, &fds);
 	FD_SET(net.mcastfd, &fds);
-	nfds = (net.mcastfd > net.fsfd? net.mcastfd : net.fsfd) + 1;
+	nfds = max(net.mcastfd, net.fsfd) + 1;
 
 	/* process socket events */
 	while (!net.exit) {
