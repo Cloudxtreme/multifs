@@ -28,6 +28,11 @@
 # define bswap16	__DARWIN_OSSwapInt16
 # define bswap32	__DARWIN_OSSwapInt32
 # define bswap64	__DARWIN_OSSwapInt64
+# ifndef BYTE_ORDER	/* not set if _DARWIN_C_SOURCE is not defined */
+#  define BYTE_ORDER	__DARWIN_BYTE_ORDER
+#  define BIG_ENDIAN	__DARWIN_BIG_ENDIAN
+#  define LITTLE_ENDIAN	__DARWIN_LITTLE_ENDIAN
+# endif
 #elif defined(__FreeBSD__) || \
       defined(__NetBSD__)
 # include <sys/endian.h>
@@ -51,6 +56,15 @@
 # define bswap16	__bswap_16
 # define bswap32	__bswap_32
 # define bswap64	__bswap_64
+#else
+# error "What platform is this?"
+#endif
+
+/*
+ * Sanity check
+ */
+#if !defined(BYTE_ORDER) || !defined(BIG_ENDIAN) || !defined(LITTLE_ENDIAN)
+# error "Byte order not defined"
 #endif
 
 /*
@@ -74,7 +88,7 @@
 #  define htole32	bswap32
 #  define htole64	bswap64
 # endif
-#else
+#elif BYTE_ORDER == LITTLE_ENDIAN
 # if !defined(betoh16)
 #  define betoh16	bswap16
 #  define betoh32	bswap32
@@ -92,6 +106,8 @@
 #  define htole32(x)	(x)
 #  define htole64(x)	(x)
 # endif
+#else
+# error "Unknown byte order"
 #endif
 
 /*
@@ -289,7 +305,7 @@ mle64put(void *dest, const uint64_t *src, size_t len)
 
 	return p;
 }
-#else
+#elif BYTE_ORDER == LITTLE_ENDIAN
 static inline void *
 mbe16get(uint16_t *dest, const void *src, size_t len)
 {
