@@ -148,11 +148,12 @@ multifs_chmod(const char *path, mode_t mode)
 {
 	int err;
 	struct stat st;
+	char *fp;
 
-	path = fullpath(multifs, path);
+	fp = fullpath(multifs, path);
 
 	/* retrieve current attributes */
-	err = stat(path, &st);
+	err = stat(fp, &st);
 	if (err < 0)
 		goto out;
 
@@ -162,10 +163,10 @@ multifs_chmod(const char *path, mode_t mode)
 	    (uint64_t) st.st_atime, (uint64_t) st.st_mtime);
 
 	/* set mode */
-	err = chmod(path, canonmode(mode));
+	err = chmod(fp, canonmode(mode));
 
 out:
-	free((void *) path);
+	free((void *) fp);
 	if (err < 0)
 		return -errno;
 
@@ -178,11 +179,12 @@ multifs_utimens(const char *path, const struct timespec ts[2])
 	int err;
 	struct stat st;
 	struct timeval tv[2];
+	char *fp;
 
-	path = fullpath(multifs, path);
+	fp = fullpath(multifs, path);
 
 	/* retrieve current attributes */
-	err = stat(path, &st);
+	err = stat(fp, &st);
 	if (err < 0)
 		goto out;
 
@@ -196,10 +198,10 @@ multifs_utimens(const char *path, const struct timespec ts[2])
 	memset(tv, '\0', sizeof(tv));
 	tv[0].tv_sec = ts[0].tv_sec;
 	tv[1].tv_sec = ts[1].tv_sec;
-	err = utimes(path, tv);
+	err = utimes(fp, tv);
 
 out:
-	free((void *) path);
+	free((void *) fp);
 	if (err < 0)
 		return -errno;
 
