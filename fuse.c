@@ -521,7 +521,7 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 
 		/* get the new attributes */
 		memset(tv, '\0', sizeof(tv));
-		r = unpack(buf, len, "bqq", &exec, atime, mtime);
+		r = unpack(buf, len, "bqq", &exec, &atime, &mtime);
 		if (r < 0)
 			goto bad_unpack;
 		tv[0].tv_sec = atime;
