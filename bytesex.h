@@ -28,7 +28,7 @@
 # define bswap16	__DARWIN_OSSwapInt16
 # define bswap32	__DARWIN_OSSwapInt32
 # define bswap64	__DARWIN_OSSwapInt64
-# ifndef BYTE_ORDER	/* not set if _DARWIN_C_SOURCE is not defined */
+# ifndef BYTE_ORDER
 #  define BYTE_ORDER	__DARWIN_BYTE_ORDER
 #  define BIG_ENDIAN	__DARWIN_BIG_ENDIAN
 #  define LITTLE_ENDIAN	__DARWIN_LITTLE_ENDIAN
@@ -56,6 +56,11 @@
 # define bswap16	__bswap_16
 # define bswap32	__bswap_32
 # define bswap64	__bswap_64
+# ifndef BYTE_ORDER
+#  define BYTE_ORDER	__BYTE_ORDER
+#  define BIG_ENDIAN	__BIG_ENDIAN
+#  define LITTLE_ENDIAN	__LITTLE_ENDIAN
+# endif
 #else
 # error "What platform is this?"
 #endif
