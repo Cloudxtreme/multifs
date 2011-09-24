@@ -14,7 +14,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "multifs.h"
+#include "error.h"
+#include "compat.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -25,21 +26,21 @@
 /*
  * Configurable output
  */
-static void	stdio(const char *, size_t, enum err);
+static void	stdio(const char *, size_t, enum error);
 
 static void
-(*outfun)(const char *, size_t, enum err) = stdio;
+(*outfun)(const char *, size_t, enum error) = stdio;
 
 void
-err_redirect(void (*fun)(const char *, size_t, enum err))
+error_redirect(void (*fun)(const char *, size_t, enum error))
 {
 	outfun = fun;
 }
 
 static void
-stdio(const char *str, size_t len, enum err err)
+stdio(const char *str, size_t len, enum error error)
 {
-	FILE *fd = err == ERR_TRACE? stdout : stderr;
+	FILE *fd = error == ERROR_TRACE? stdout : stderr;
 
 	fprintf(fd, "%s: ", getprogname());
 	fwrite(str, 1, len, fd);
@@ -50,7 +51,7 @@ stdio(const char *str, size_t len, enum err err)
  * Output an error message
  */
 static void
-output(int code, const char *fmt, va_list ap, enum err err)
+output(int code, const char *fmt, va_list ap, enum error error)
 {
 	static char buf[256];
 	char *p, *end;
@@ -67,7 +68,7 @@ output(int code, const char *fmt, va_list ap, enum err err)
 	if (code >= 0)
 		p += snprintf(p, end - p, "%s", strerror(code));
 
-	outfun(buf, p - buf, err);
+	outfun(buf, p - buf, error);
 }
 
 /*
@@ -76,7 +77,7 @@ output(int code, const char *fmt, va_list ap, enum err err)
 void
 vtrace(const char *fmt, va_list ap)
 {
-	output(-1, fmt, ap, ERR_TRACE);
+	output(-1, fmt, ap, ERROR_TRACE);
 }
 
 void
@@ -85,7 +86,7 @@ trace(const char *fmt, ...)
 	va_list ap;
 
 	va_start(ap, fmt);
-	output(-1, fmt, ap, ERR_TRACE);
+	output(-1, fmt, ap, ERROR_TRACE);
 	va_end(ap);
 }
 
@@ -93,50 +94,50 @@ trace(const char *fmt, ...)
  * Warnings
  */
 void
-vwarnc(int code, const char *fmt, va_list ap)
+vwarningc(int code, const char *fmt, va_list ap)
 {
-	output(code, fmt, ap, ERR_WARN);
+	output(code, fmt, ap, ERROR_WARNING);
 }
 
 void
-warnc(int code, const char *fmt, ...)
+warningc(int code, const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	output(code, fmt, ap, ERR_WARN);
+	output(code, fmt, ap, ERROR_WARNING);
 	va_end(ap);
 }
 
 void
-vwarn(const char *fmt, va_list ap)
+vwarning(const char *fmt, va_list ap)
 {
-	output(errno, fmt, ap, ERR_WARN);
+	output(errno, fmt, ap, ERROR_WARNING);
 }
 
 void
-warn(const char *fmt, ...)
+warning(const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	output(errno, fmt, ap, ERR_WARN);
+	output(errno, fmt, ap, ERROR_WARNING);
 	va_end(ap);
 }
 
 void
-vwarnx(const char *fmt, va_list ap)
+vwarningx(const char *fmt, va_list ap)
 {
-	output(-1, fmt, ap, ERR_WARN);
+	output(-1, fmt, ap, ERROR_WARNING);
 }
 
 void
-warnx(const char *fmt, ...)
+warningx(const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	output(-1, fmt, ap, ERR_WARN);
+	output(-1, fmt, ap, ERROR_WARNING);
 	va_end(ap);
 }
 
@@ -144,50 +145,50 @@ warnx(const char *fmt, ...)
  * Errors
  */
 void
-verrc(int status, int code, const char *fmt, va_list ap)
+vfatalc(int status, int code, const char *fmt, va_list ap)
 {
-	output(code, fmt, ap, ERR_ERR);
+	output(code, fmt, ap, ERROR_WARNING);
 	exit(status);
 }
 
 void
-errc(int status, int code, const char *fmt, ...)
+fatalc(int status, int code, const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	verrc(status, code, fmt, ap);
+	vfatalc(status, code, fmt, ap);
 	va_end(ap);
 }
 
 void
-verr(int status, const char *fmt, va_list ap)
+vfatal(int status, const char *fmt, va_list ap)
 {
-	verrc(status, errno, fmt, ap);
+	vfatalc(status, errno, fmt, ap);
 }
 
 void
-err(int status, const char *fmt, ...)
+fatal(int status, const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	verrc(status, errno, fmt, ap);
+	vfatalc(status, errno, fmt, ap);
 	va_end(ap);
 }
 
 void
-verrx(int status, const char *fmt, va_list ap)
+vfatalx(int status, const char *fmt, va_list ap)
 {
-	verrc(status, -1, fmt, ap);
+	vfatalc(status, -1, fmt, ap);
 }
 
 void
-errx(int status, const char *fmt, ...)
+fatalx(int status, const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	verrc(status, -1, fmt, ap);
+	vfatalc(status, -1, fmt, ap);
 	va_end(ap);
 }

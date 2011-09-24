@@ -19,6 +19,7 @@
 #define MULTIFS_H
 
 #include "compat.h"
+#include "error.h"
 #include "hash.h"
 #include "pack.h"
 
@@ -104,31 +105,5 @@ int		 multifs_process(struct multifs *, enum msg, const char *, size_t);
 /* net.c */
 void		 net_init(struct multifs *);
 int		 net_send(int, enum msg, const char *, ...);
-
-/* err.c */
-enum err {
-	ERR_TRACE,
-	ERR_WARN,
-	ERR_ERR
-};
-
-void		 err_redirect(void (*)(const char *, size_t, enum err));
-
-void		 vtrace(const char *, va_list);
-void		 trace(const char *, ...);
-
-void		 vwarnc(int, const char *, va_list);
-void		 warnc(int, const char *, ...);
-void		 vwarn(const char *, va_list);
-void		 warn(const char *, ...);
-void		 vwarnx(const char *, va_list);
-void		 warnx(const char *, ...);
-
-NORETURN void	 verrc(int, int, const char *, va_list);
-NORETURN void	 errc(int, int, const char *, ...);
-NORETURN void	 verr(int, const char *, va_list);
-NORETURN void	 err(int, const char *, ...);
-NORETURN void	 verrx(int, const char *, va_list);
-NORETURN void	 errx(int, const char *, ...);
 
 #endif /* MULTIFS_H */

@@ -79,13 +79,13 @@ opt_proc(void *data, const char *arg, int key,
 		if (multifs->fsname == NULL) {
 			multifs->fsname = strdup(arg);
 			if (multifs->fsname == NULL)
-				err(1, "strdup");
+				fatal(1, "strdup");
 			multifs->fsnamelen = strlen(multifs->fsname);
 			return 0;
 		} else if (multifs->fsroot == NULL) {
 			multifs->fsroot = realpath(arg, NULL);
 			if (multifs->fsroot == NULL)
-				err(1, "%s", arg);
+				fatal(1, "%s", arg);
 			multifs->fsrootlen = strlen(multifs->fsroot);
 			return 0;
 		}
@@ -109,7 +109,7 @@ opt_proc(void *data, const char *arg, int key,
 		return 0;
     	}
 
-	errx(1, "internal error");
+	fatalx(1, "internal error");
 }
 
 int
@@ -131,9 +131,9 @@ main(int argc, char *argv[])
 
 	/* validate arguments */
 	if (multifs.fsname == NULL)
-		warnx("missing filesystem name");
+		warningx("missing filesystem name");
 	else if (multifs.fsroot == NULL)
-		warnx("missing data directory");
+		warningx("missing data directory");
 	else
 		return multifs_main(args.argc, args.argv, &multifs);
 

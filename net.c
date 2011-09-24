@@ -163,28 +163,28 @@ make_socket(int port)
 	/* create the socket */
 	mcastfd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (mcastfd < 0)
-		err(1, "socket");
+		fatal(1, "socket");
 
 	/* set options */
 	opt = 1;
 #if defined(SO_REUSEPORT)
 	if (setsockopt(mcastfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(SOL_SOCKET, SO_REUSEPORT)");
+		fatal(1, "setsockopt(SOL_SOCKET, SO_REUSEPORT)");
 #elif defined(HAVE_REUSEADDR_LIKE_REUSEPORT)
 	if (setsockopt(mcastfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(SOL_SOCKET, SO_REUSEADDR)");
+		fatal(1, "setsockopt(SOL_SOCKET, SO_REUSEADDR)");
 #endif
 
 	opt = 1;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(IPPROTO_IPV6, IPV6_V6ONLY)");
+		fatal(1, "setsockopt(IPPROTO_IPV6, IPV6_V6ONLY)");
 
 	opt = 0;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(IPPROTO_IPV6, IPV6_MULTICAST_HOPS)");
+		fatal(1, "setsockopt(IPPROTO_IPV6, IPV6_MULTICAST_HOPS)");
 	opt = 255;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(IPPROTO_IPV6, IPV6_MULTICAST_HOPS)");
+		fatal(1, "setsockopt(IPPROTO_IPV6, IPV6_MULTICAST_HOPS)");
 
 	/* bind to the local port */
 	memset(&sin6, '\0', sizeof(sin6));
@@ -194,7 +194,7 @@ make_socket(int port)
 #endif /* HAVE_SA_LEN */
 	sin6.sin6_port = htons(port);
 	if (bind(mcastfd, (const struct sockaddr *) &sin6, sizeof(sin6)) < 0)
-		err(1, "bind");
+		fatal(1, "bind");
 
 	return mcastfd;
 }
@@ -237,7 +237,7 @@ make_multicast(int mcastfd, const struct sockaddr_in6 *addr)
 	mreq.ipv6mr_multiaddr = addr->sin6_addr;
 	mreq.ipv6mr_interface = 0;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) < 0)
-		err(1, "setsockopt(IPV6_JOIN_GROUP)");
+		fatal(1, "setsockopt(IPV6_JOIN_GROUP)");
 }
 
 /*
@@ -249,7 +249,7 @@ getmyaddr(struct in6_addr *self)
 	struct ifaddrs *ifap, *i;
 
 	if (getifaddrs(&ifap) < 0)
-		err(1, "getifaddrs");
+		fatal(1, "getifaddrs");
 
 	for (i = ifap; i != NULL; i = i->ifa_next) {
 		const struct in6_addr *addr;
@@ -275,14 +275,14 @@ getmyaddr(struct in6_addr *self)
  * Log an error message to syslog
  */
 static void
-syslog_err(const char *str, size_t len, enum err err)
+syslog_err(const char *str, size_t len, enum error error)
 {
 	int priority;
 
-	switch (err) {
-	case ERR_ERR:	priority = LOG_ERR;	break;
-	case ERR_WARN:	priority = LOG_WARNING;	break;
-	case ERR_TRACE:	priority = LOG_DEBUG;	break;
+	switch (error) {
+	case ERROR_FATAL:	priority = LOG_ERR;	break;
+	case ERROR_WARNING:	priority = LOG_WARNING;	break;
+	case ERROR_TRACE:	priority = LOG_DEBUG;	break;
 	}
 
 	openlog(getprogname(), LOG_PID, LOG_DAEMON);
@@ -358,7 +358,7 @@ mcast_send_process(struct net *net, struct packet *packet)
 
 	/* send the packet */
 	if (sendmsg(net->mcastfd, &msghdr, 0) < 0)
-		warn("mcast_send_process: sendmsg");
+		warning("mcast_send_process: sendmsg");
 
 	/* place the packet on the list of sent packets, to be expunged at a
 	 * later moment */
@@ -426,7 +426,7 @@ mcast_send(struct net *net, enum msg msg, const char *fmt, ...)
 	/* allocate memory for the packet */
 	packet = malloc(sizeof(*packet) - sizeof(packet->buf) + len);
 	if (packet == NULL) {
-		warn("mcast_send: malloc(%zu)", sizeof(*packet) - sizeof(packet->buf) + len);
+		warning("mcast_send: malloc(%zu)", sizeof(*packet) - sizeof(packet->buf) + len);
 		return;
 	}
 
@@ -492,7 +492,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		if (memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
 			/* log spurious owner changes */
 			if (net->state == STATE_FOUND_TOKEN)
-				warnx("mcast_recv_process: spurious token owner change: %s -> %s",
+				warningx("mcast_recv_process: spurious token owner change: %s -> %s",
 				    inet_ntop(AF_INET6, &net->owner, buf1, sizeof(buf1)),
 				    inet_ntop(AF_INET6, &packet->from, buf2, sizeof(buf2)));
 		}
@@ -514,7 +514,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		/* get the new owner */
 		if (unpack(packet->buf, packet->len, "*b",
 		    sizeof(net->owner), &net->owner) < 0)
-			warn("mcast_recv_process: unpack");
+			warning("mcast_recv_process: unpack");
 		net->state = memcmp(&net->owner, &net->self, sizeof(net->owner)) == 0?
 		    STATE_HAS_TOKEN : STATE_FOUND_TOKEN;
 
@@ -522,7 +522,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 
 	default:
 		if (multifs_process(net->multifs, packet->msg, packet->buf, packet->len) == 0)
-			warnx("mcast_recv_process: unknown message %d", packet->msg);
+			warningx("mcast_recv_process: unknown message %d", packet->msg);
 	}
 
 	free(packet);
@@ -547,7 +547,7 @@ mcast_recv_dequeue(struct net *net)
 		 * the token */
 		if (memcmp(&net->owner, &packet->from,
 		    sizeof(net->owner)) != 0) {
-			warnx("mcast_recv_process: packet with sequence not "
+			warningx("mcast_recv_process: packet with sequence not "
 			    "from token owner");
 			free(packet);
 			continue;
@@ -579,7 +579,7 @@ mcast_recv(struct net *net)
 	/* get packet length */
 	len = 0;
 	if (ioctl(net->mcastfd, FIONREAD, &len) < 0) {
-		warn("mcast_recv: ioctl(FIONREAD)");
+		warning("mcast_recv: ioctl(FIONREAD)");
 		return;
 	}
 
@@ -597,11 +597,11 @@ mcast_recv(struct net *net)
 
 		/* receive */
 		if (recvmsg(net->mcastfd, &msghdr, 0) < 0) {
-			warn("mcast_recv: recvmsg");
+			warning("mcast_recv: recvmsg");
 			goto out;
 		}
 
-		warnx("mcast_recv: packet too small (%d) from %s",
+		warningx("mcast_recv: packet too small (%d) from %s",
 		    len, net_addr(net, &from));
 
 		return;
@@ -612,7 +612,7 @@ mcast_recv(struct net *net)
 	/* allocate memory for the packet */
 	packet = malloc(offsetof(struct packet, buf) + len);
 	if (packet == NULL) {
-		warn("mcast_recv: malloc(%zu)",
+		warning("mcast_recv: malloc(%zu)",
 		    offsetof(struct packet, buf) + len);
 		return;
 	}
@@ -631,7 +631,7 @@ mcast_recv(struct net *net)
 
 	/* receive */
 	if (recvmsg(net->mcastfd, &msghdr, 0) < 0) {
-		warn("mcast_recv: recvmsg");
+		warning("mcast_recv: recvmsg");
 		goto out;
 	}
 
@@ -641,13 +641,13 @@ mcast_recv(struct net *net)
 	packet->from = from.sin6_addr;
 	if (unpack(header, sizeof(header), "bbwq",
 	    &version, &packet->msg, &plen, &packet->sequence) < 0) {
-		warn("mcast_recv: unpack");
+		warning("mcast_recv: unpack");
 		goto out;
 	}
 
 	/* check version */
 	if (version != NET_VERSION) {
-		warnx("mcast_recv: bad version %d from %s", version,
+		warningx("mcast_recv: bad version %d from %s", version,
 		    net_addr(net, &from));
 		goto out;
 	}
@@ -656,7 +656,7 @@ mcast_recv(struct net *net)
 	 * works around broken FIONREAD implementations (I'm looking at you,
 	 * FreeBSD & Mac OS X) */
 	if (packet->len < plen) {
-		warnx("mcast_recv: truncated packet (got %d, expected %d)",
+		warningx("mcast_recv: truncated packet (got %d, expected %d)",
 		    len, plen);
 		goto out;
 	}
@@ -709,7 +709,7 @@ fs_recv(struct net *net)
 	/* allocate memory for the packet */
 	packet = malloc(offsetof(struct packet, buf) + len);
 	if (packet == NULL) {
-		warn("fs_recv: malloc(%zu)", offsetof(struct packet, buf) + len);
+		warning("fs_recv: malloc(%zu)", offsetof(struct packet, buf) + len);
 		return;
 	}
 
@@ -725,7 +725,7 @@ fs_recv(struct net *net)
 
 	/* receive the packet */
 	if (reliable_io(net->fsfd, iov, nitems(iov), readv) < 0) {
-		warn("fs_recv: readv");
+		warning("fs_recv: readv");
 		free(packet);
 		return;
 	}
@@ -839,7 +839,7 @@ net_init(struct multifs *multifs)
 	socklen = sizeof(multifs->maxmsglen);
 	if (getsockopt(net.mcastfd, SOL_SOCKET, SO_SNDBUF,
 	    &multifs->maxmsglen, &socklen) < 0)
-		err(1, "getsockopt(SOL_SOCKET, SO_SNDBUF)");
+		fatal(1, "getsockopt(SOL_SOCKET, SO_SNDBUF)");
 	multifs->maxmsglen -= HEADERSZ;
 
 	trace("using multicast group %s",
@@ -848,11 +848,11 @@ net_init(struct multifs *multifs)
 	/* create the sockets the fuse worker uses to communicate with the
 	 * networking worker */
 	if (pipe(fd) < 0)
-		err(1, "pipe");
+		fatal(1, "pipe");
 
 	switch (multifs->netpid = fork()) {
 	case -1:
-		err(1, "fork");
+		fatal(1, "fork");
 
 	case 0:
 		/* in child, continues below */
@@ -877,7 +877,7 @@ net_init(struct multifs *multifs)
 
 	/* redirect everything from now to syslog */
 	if (!multifs->debug)
-		err_redirect(syslog_err);
+		error_redirect(syslog_err);
 
 	/* try to find out who has the token */
 	net.state = STATE_SEARCHING_TOKEN;
@@ -900,7 +900,7 @@ net_init(struct multifs *multifs)
 		n = select(nfds, &rfds, NULL, NULL,
 		    net.state >= STATE_WITHOUT_TIMEOUT? NULL : &tv);
 		if (n < 0) {
-			warn("select");
+			warning("select");
 			continue;
 		}
 

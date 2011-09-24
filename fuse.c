@@ -70,7 +70,7 @@ multifs_destroy(void *UNUSED(data))
 	/* wait for the networking worker to terminate */
 	close(multifs->netfd);
 	if (waitpid(multifs->netpid, &status, 0) < 0)
-		warn("waitpid");
+		warning("waitpid");
 }
 
 
@@ -473,7 +473,7 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 		case MSG_OBJ_SYMLINK:	r = symlink(path, newpath); break;
 		case MSG_OBJ_RENAME:	r = rename(path, newpath); break;
 		case MSG_FILE_LINK:	r = link(path, newpath); break;
-		default:		errx(1, "can't happen");
+		default:		fatalx(1, "can't happen");
 		}
 		break;
 	}
@@ -528,13 +528,13 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 
 	/* report errors */
 	if (r < 0) {
-		warn("multifs_process(%s)", path);
+		warning("multifs_process(%s)", path);
 		return -1;
 	}
 
 	return 1;
 
 bad_unpack:
-	warn("multifs_process: unpack");
+	warning("multifs_process: unpack");
 	return -1;
 }
