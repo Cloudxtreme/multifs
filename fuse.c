@@ -236,17 +236,16 @@ multifs_rename(const char *from, const char *to)
  ***************************************************************************/
 
 static int
-multifs_mkdir(const char *path, mode_t mode)
+multifs_mkdir(const char *path, mode_t UNUSED(mode))
 {
 	int r;
 
 	/* broadcast the change */
-	net_send(multifs->netfd, MSG_DIR_CREATE, "s",
-	    strlen(path), path, mode & (S_IXUSR | S_IXGRP | S_IXOTH)? 1 : 0);
+	net_send(multifs->netfd, MSG_DIR_CREATE, "s", strlen(path), path);
 
 	/* create the directory */ 
 	path = fullpath(multifs, path);
-	r = mkdir(path, mode);
+	r = mkdir(path, canonmode(S_IFDIR));
 	free((void *) path);
 
 	if (r < 0)
