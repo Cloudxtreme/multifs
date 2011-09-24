@@ -66,17 +66,29 @@ enum msg {
 	MSG_TOKEN_WHERE		= 0x20,	/* look for the token */
 	MSG_TOKEN_HERE,			/* report where the token is */
 	MSG_TOKEN_ASK,			/* ask for the token */
-	MSG_TOKEN_GIVE		= 0x3f,	/* give the token away */
+	MSG_TOKEN_GIVE		= 0x2f,	/* give the token away */
+
+	/*
+	 * Object operations
+	 */
+	MSG_OBJ_SYMLINK		= 0x30,
+	MSG_OBJ_RENAME,
+	MSG_OBJ_SETATTR,
+
+	/*
+	 * Directory operations
+	 */
+	MSG_DIR_CREATE		= 0x40,
+	MSG_DIR_REMOVE,
 
 	/*
 	 * File operations
 	 */
-	MSG_FILE_CREATE		= 0x40,
+	MSG_FILE_CREATE		= 0x50,
+	MSG_FILE_TRUNCATE,
 	MSG_FILE_LINK,
 	MSG_FILE_UNLINK,
-	MSG_FILE_LOCK,
-	MSG_FILE_UNLOCK,
-	MSG_FILE_FSYNC,
+	MSG_FILE_SETLOCK,
 	MSG_FILE_WRITE,
 
 	/*
