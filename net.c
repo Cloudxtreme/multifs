@@ -164,22 +164,22 @@ make_socket(int port)
 	opt = 1;
 #if defined(SO_REUSEPORT)
 	if (setsockopt(mcastfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(SO_REUSEPORT)");
+		err(1, "setsockopt(SOL_SOCKET, SO_REUSEPORT)");
 #elif defined(HAVE_REUSEADDR_LIKE_REUSEPORT)
 	if (setsockopt(mcastfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(SO_REUSEADDR)");
+		err(1, "setsockopt(SOL_SOCKET, SO_REUSEADDR)");
 #endif
 
 	opt = 1;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(IPV6_V6ONLY)");
+		err(1, "setsockopt(IPPROTO_IPV6, IPV6_V6ONLY)");
 
 	opt = 0;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(IPV6_MULTICAST_HOPS)");
+		err(1, "setsockopt(IPPROTO_IPV6, IPV6_MULTICAST_HOPS)");
 	opt = 255;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &opt, sizeof(opt)) < 0)
-		err(1, "setsockopt(IPV6_MULTICAST_HOPS)");
+		err(1, "setsockopt(IPPROTO_IPV6, IPV6_MULTICAST_HOPS)");
 
 	/* bind to the local port */
 	memset(&sin6, '\0', sizeof(sin6));
@@ -762,6 +762,7 @@ net_init(struct multifs *multifs)
 	int fd[2], nfds;
 	struct net net;
 	fd_set fds;
+	socklen_t socklen;
 
 	/* create the server socket */
 	memset(&net, '\0', sizeof(net));
@@ -771,6 +772,13 @@ net_init(struct multifs *multifs)
 	/* set it to multicast */
 	make_addr(multifs->fsname, multifs->fsnamelen, NET_PORT, &net.multicast);
 	make_multicast(net.mcastfd, &net.multicast);
+
+	/* determine maximum message length */
+	socklen = sizeof(multifs->maxmsglen);
+	if (getsockopt(net.mcastfd, SOL_SOCKET, SO_SNDBUF,
+	    &multifs->maxmsglen, &socklen) < 0)
+		err(1, "getsockopt(SOL_SOCKET, SO_SNDBUF)");
+	multifs->maxmsglen -= HEADERSZ;
 
 	trace("using multicast group %s",
 	    net_addr(&net, &net.multicast));

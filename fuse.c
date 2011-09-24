@@ -26,8 +26,6 @@
 #include <fuse/fuse.h>
 #include <sys/param.h>
 
-#define CHUNKSZ		32768
-
 static char *
 fullpath(struct multifs *multifs, const char *path)
 {
@@ -116,13 +114,18 @@ multifs_write(const char *path, const char *buf, size_t size, off_t offset,
               struct fuse_file_info *fi)
 {
 	ssize_t r;
-	size_t i, s;
+	size_t i, s, chunksz, pathlen;
+
+	/* determine the chunk size */
+	pathlen = strlen(path);
+	chunksz = multifs->maxmsglen - pack(NULL, 0, "sq", pathlen,
+	    path, (uint64_t) 0);
 
 	/* transmit the write in chunks */
-	for (i = 0; i < size; i += CHUNKSZ) {
-		s = min(CHUNKSZ, size - i);
-		net_send(multifs->netfd, MSG_FILE_WRITE, "sq*b", strlen(path), path,
-		    (uint64_t) offset + i, s, buf + i);
+	for (i = 0; i < size; i += chunksz) {
+		s = min(chunksz, size - i);
+		net_send(multifs->netfd, MSG_FILE_WRITE, "sq*b", pathlen,
+		    path, (uint64_t) offset + i, s, buf + i);
 	}
 
 	/* write to the file */

@@ -50,6 +50,7 @@ struct multifs {
 	size_t		 fsrootlen;
 	pid_t		 netpid;
 	int		 netfd;
+	int		 maxmsglen;
 };
 
 /* network messages */
