@@ -28,6 +28,8 @@
 #include <sys/param.h>
 #include <sys/types.h>
 
+#define UNUSED(x)		unused_ ## x __attribute__ ((unused))
+
 #define nitems(arr)		(sizeof(arr) / sizeof((arr)[0]))
 #define min(a, b)		((a) < (b)? (a) : (b))
 #define max(a, b)		((a) < (b)? (b) : (a))

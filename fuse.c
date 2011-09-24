@@ -49,7 +49,7 @@ fullpath(struct multifs *multifs, const char *path)
 #define multifs		((struct multifs *) (fuse_get_context()->private_data))
 
 static void *
-multifs_init(struct fuse_conn_info *conn)
+multifs_init(struct fuse_conn_info *UNUSED(conn))
 {
 	/* create the networking helper */
 	net_init(multifs);
@@ -58,7 +58,7 @@ multifs_init(struct fuse_conn_info *conn)
 }
 
 static void
-multifs_destroy(void *data)
+multifs_destroy(void *UNUSED(data))
 {
 	/* terminate the networking worker */
 	kill(multifs->netpid, SIGTERM);
@@ -88,7 +88,7 @@ multifs_open(const char *path, struct fuse_file_info *fi)
 	fi->fh = open(path, fi->flags);
 	free((void *) path);
 
-	if (fi->fh < 0)
+	if ((int) fi->fh < 0)
 		return -errno;
 
 	/* enable direct I/O if we're only reading */
@@ -98,7 +98,7 @@ multifs_open(const char *path, struct fuse_file_info *fi)
 }
 
 static int
-multifs_read(const char *path, char *buf, size_t size, off_t offset,
+multifs_read(const char *UNUSED(path), char *buf, size_t size, off_t offset,
               struct fuse_file_info *fi)
 {
 	ssize_t r;
@@ -148,7 +148,7 @@ multifs_opendir(const char *path, struct fuse_file_info *fi)
 }
 
 static int
-multifs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+multifs_readdir(const char *UNUSED(path), void *buf, fuse_fill_dir_t filler,
                  off_t offset, struct fuse_file_info *fi)
 {
 	DIR *dir = (DIR *) fi->fh;
@@ -175,7 +175,7 @@ multifs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 }
 
 static int
-multifs_releasedir(const char *path, struct fuse_file_info *fi)
+multifs_releasedir(const char *UNUSED(path), struct fuse_file_info *fi)
 {
 	if (closedir((DIR *) fi->fh) < 0)
 		return -errno;

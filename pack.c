@@ -198,7 +198,7 @@ vunpack(const char *const buf, const size_t len, const char *fmt, va_list ap)
 				UNPACK(16, i);
 				i &= ~(1 << 15);
 			}
-			i = min(i, end - p);
+			i = min(i, (size_t) (end - p));
 
 			/* get the string */
 			memcpy(s, p, min(*l, i));
