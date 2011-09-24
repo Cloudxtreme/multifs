@@ -99,6 +99,54 @@ static const struct in6_addr
 in6_addr_any = IN6ADDR_ANY_INIT;
 
 /*
+ * Reliably perform I/O on a file descriptor, dealing with short
+ * reads/writes.
+ */
+static ssize_t
+reliable_io(int fd, const struct iovec *iov, int iovcnt,
+            ssize_t (*iofn)(int, const struct iovec *, int))
+{
+	ssize_t n, total;
+	struct iovec *i = NULL;
+
+	total = 0;
+	while (1) {
+		/* perform the operation */
+		n = iofn(fd, iov, iovcnt);
+		if (n < 0 || (total == 0 && n == 0))
+			return total == 0? n : total;
+
+		/* figure out how much we have processed */
+		total += n;
+		while (iovcnt > 0 && (size_t) n >= iov->iov_len) {
+			n -= (iov++)->iov_len;
+			iovcnt--;
+		}
+
+		/* are we done? */
+		if (iovcnt == 0)
+			break;
+
+		/* we won't overwrite our arguments, so check if we need to
+		 * allocate a new buffer to hold the remaining iovecs */
+		if (i == NULL) {
+			i = alloca(sizeof(*iov) * iovcnt);
+			memcpy(i, iov, sizeof(*iov) * iovcnt);
+			iov = i;
+		} else {
+			/* adjust pointer */
+			i = (struct iovec *) iov;
+		}
+
+		/* adjust for partial read */
+		i->iov_base = (char *) i->iov_base + n;
+		i->iov_len -= n;
+	}
+
+	return total;
+}
+
+/*
  * Create the server socket and bind it to the specified local port
  */
 static int
@@ -197,7 +245,7 @@ syslog_err(const char *str, size_t len, enum err err)
 	switch (err) {
 	case ERR_ERR:	priority = LOG_ERR;	break;
 	case ERR_WARN:	priority = LOG_WARNING;	break;
-	case ERR_TRACE:	priority = LOG_NOTICE;	break;
+	case ERR_TRACE:	priority = LOG_DEBUG;	break;
 	}
 
 	openlog(getprogname(), LOG_PID, LOG_DAEMON);
@@ -604,9 +652,9 @@ fs_recv(struct net *net)
 	}
 
 	/* allocate memory for the packet */
-	packet = malloc(sizeof(*packet) - sizeof(packet->buf) + len);
+	packet = malloc(offsetof(struct packet, buf) + len);
 	if (packet == NULL) {
-		warn("fs_recv: malloc(%zu)", sizeof(*packet) - sizeof(packet->buf) + len);
+		warn("fs_recv: malloc(%zu)", offsetof(struct packet, buf) + len);
 		return;
 	}
 
@@ -621,7 +669,7 @@ fs_recv(struct net *net)
 	iov[1].iov_len = len;
 
 	/* receive the packet */
-	if (readv(net->fsfd, iov, nitems(iov)) < 0) {
+	if (reliable_io(net->fsfd, iov, nitems(iov), readv) < 0) {
 		warn("fs_recv: readv");
 		free(packet);
 		return;
@@ -662,7 +710,7 @@ net_send(int netfd, enum msg msg, const char *fmt, ...)
 	vpack(iov[2].iov_base, len, fmt, ap);
 	va_end(ap);
 
-	return writev(netfd, iov, nitems(iov));
+	return reliable_io(netfd, iov, nitems(iov), writev);
 }
 
 
@@ -675,6 +723,8 @@ timeout(struct net *net)
 {
 	switch (net->state) {
 	case STATE_SEARCHING_TOKEN2:
+		trace("token not found, taking ownership");
+
 		/* nobody responded on our request, so unilaterally declare
 		 * that we have the token (ie. steal it) */
 		mcast_send(net, MSG_TOKEN_HERE, "");
@@ -727,8 +777,8 @@ net_init(struct multifs *multifs)
 
 	/* create the sockets the fuse worker uses to communicate with the
 	 * networking worker */
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fd) < 0)
-		err(1, "socketpair");
+	if (pipe(fd) < 0)
+		err(1, "pipe");
 
 	switch (multifs->netpid = fork()) {
 	case -1:
