@@ -27,6 +27,15 @@
 #include <unistd.h>
 #include <sys/param.h>
 #include <sys/wait.h>
+#include <sys/time.h>
+
+#ifndef TIMESPEC_TO_TIMEVAL
+# define TIMESPEC_TO_TIMEVAL(tv, ts)                                        \
+	do {                                                                \
+		(tv)->tv_sec = (ts)->tv_sec;                                \
+		(tv)->tv_usec = (ts)->tv_nsec / 1000;                       \
+	} while (0)
+#endif
 
 static char *
 fullpath(struct multifs *multifs, const char *path)
@@ -46,7 +55,20 @@ fullpath(struct multifs *multifs, const char *path)
 	return ret;
 }
 
+static mode_t
+canonmode(mode_t mode)
+{
+	return (mode & S_IFMT) |
+	    S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH |
+	    (mode & (S_IXUSR | S_IXGRP | S_IXOTH) || (mode & S_IFMT) == S_IFDIR?
+	     S_IXUSR | S_IXGRP | S_IXOTH : 0);
+}
+
 #define multifs		((struct multifs *) (fuse_get_context()->private_data))
+
+#define getfpid()	(fuse_get_context()->pid)
+#define getfuid()	(fuse_get_context()->uid)
+#define getfgid()	(fuse_get_context()->gid)
 
 
 /***************************************************************************
@@ -101,15 +123,49 @@ multifs_symlink(const char *to, const char *from)
 }
 
 static int
-multifs_getattr(const char *path, struct stat *stbuf)
+multifs_getattr(const char *path, struct stat *st)
 {
 	int err;
 
 	/* retrieve file attributes */
 	path = fullpath(multifs, path);
-	err = stat(path, stbuf);
+	err = stat(path, st);
 	free((void *) path);
 
+	if (err < 0)
+		return -errno;
+
+	/* we don't need no steenkin' pur-missjuns */
+	st->st_uid = getfuid();
+	st->st_gid = getfuid();
+	st->st_mode = canonmode(st->st_mode);
+
+	return 0;
+}
+
+static int
+multifs_chmod(const char *path, mode_t mode)
+{
+	int err;
+	struct stat st;
+
+	path = fullpath(multifs, path);
+
+	/* retrieve current attributes */
+	err = stat(path, &st);
+	if (err < 0)
+		goto out;
+
+	/* broadcast change */
+	net_send(multifs->netfd, MSG_OBJ_SETATTR, "sbqq", strlen(path), path,
+	    mode & (S_IXUSR | S_IXGRP | S_IXOTH)? 1 : 0,
+	    (uint64_t) st.st_atime, (uint64_t) st.st_mtime);
+
+	/* set mode */
+	err = chmod(path, canonmode(mode));
+
+out:
+	free((void *) path);
 	if (err < 0)
 		return -errno;
 
@@ -117,21 +173,37 @@ multifs_getattr(const char *path, struct stat *stbuf)
 }
 
 static int
-multifs_chmod(const char *UNUSED(path), mode_t UNUSED(mode))
+multifs_utimens(const char *path, const struct timespec ts[2])
 {
-	return -ENOSYS;
-}
+	int err;
+	struct stat st;
+	struct timeval tv[2];
 
-static int
-multifs_chown(const char *UNUSED(path), uid_t UNUSED(uid), gid_t UNUSED(gid))
-{
-	return -ENOSYS;
-}
+	path = fullpath(multifs, path);
 
-static int
-multifs_utimens(const char *UNUSED(path), const struct timespec UNUSED(ts[2]))
-{
-	return -ENOSYS;
+	/* retrieve current attributes */
+	err = stat(path, &st);
+	if (err < 0)
+		goto out;
+
+	/* broadcast change */
+	net_send(multifs->netfd, MSG_OBJ_SETATTR, "sbqq", strlen(path), path,
+	    st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)? 1 : 0,
+	    (uint64_t) ts[0].tv_sec, (uint64_t) ts[1].tv_sec);
+
+	/* set time -- only use second-resolution here because that's what
+	 * we transport over the network as well */
+	memset(tv, '\0', sizeof(tv));
+	tv[0].tv_sec = ts[0].tv_sec;
+	tv[1].tv_sec = ts[1].tv_sec;
+	err = utimes(path, tv);
+
+out:
+	free((void *) path);
+	if (err < 0)
+		return -errno;
+
+	return 0;
 }
 
 static int
@@ -392,7 +464,6 @@ multifs_ops = {
 	.symlink	= multifs_symlink,
 	.getattr	= multifs_getattr,
 	.chmod		= multifs_chmod,
-	.chown		= multifs_chown,
 	.utimens	= multifs_utimens,
 	.rename		= multifs_rename,
 
@@ -442,6 +513,39 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 	path[multifs->fsrootlen + pathlen] = '\0';
 
 	switch (msg) {
+	case MSG_OBJ_SETATTR: {
+		uint8_t exec;
+		uint64_t atime, mtime;
+		struct timeval tv[2];
+		struct stat st;
+
+		/* get the new attributes */
+		memset(tv, '\0', sizeof(tv));
+		r = unpack(buf, len, "bqq", &exec, atime, mtime);
+		if (r < 0)
+			goto bad_unpack;
+		tv[0].tv_sec = atime;
+		tv[1].tv_sec = mtime;
+
+		/* get current attributes */
+		r = stat(path, &st);
+		if (r < 0)
+			goto err;
+
+		/* set new mode */
+		if (exec)
+			st.st_mode |= S_IXUSR | S_IXGRP | S_IXOTH;
+		else
+			st.st_mode &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
+		r = chmod(path, st.st_mode);
+		if (r < 0)
+			goto err;
+
+		/* set time */
+		r = utimes(path, tv);
+		break;
+	}
+
 	case MSG_FILE_TRUNCATE: {
 		uint64_t length;
 
@@ -528,6 +632,7 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 
 	/* report errors */
 	if (r < 0) {
+err:
 		warning("multifs_process(%s)", path);
 		return -1;
 	}
