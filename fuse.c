@@ -433,12 +433,13 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 
 	/* decode the path */
 	memcpy(path, multifs->fsroot, multifs->fsrootlen);
-	pathlen = sizeof(path) - multifs->fsrootlen;
+	pathlen = sizeof(path) - multifs->fsrootlen - 1;
 	r = unpack(buf, len, "s", &pathlen, path + multifs->fsrootlen);
-	if (r < 0) 
+	if (r < 0)
 		goto bad_unpack;
 	buf += r;
 	len -= r;
+	path[multifs->fsrootlen + pathlen] = '\0';
 
 	switch (msg) {
 	case MSG_FILE_TRUNCATE: {
@@ -461,10 +462,11 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 
 		/* get the new name */
 		memcpy(newpath, multifs->fsroot, multifs->fsrootlen);
-		pathlen = sizeof(newpath) - multifs->fsrootlen;
+		pathlen = sizeof(newpath) - multifs->fsrootlen - 1;
 		r = unpack(buf, len, "s", &pathlen, newpath + multifs->fsrootlen);
 		if (r < 0) 
 			goto bad_unpack;
+		newpath[multifs->fsrootlen + pathlen] = '\0';
 
 		/* do what we must */
 		switch (msg) {
@@ -526,7 +528,7 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 
 	/* report errors */
 	if (r < 0) {
-		warn("multifs_process(%*s)", (int) pathlen, path);
+		warn("multifs_process(%s)", path);
 		return -1;
 	}
 
