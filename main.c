@@ -17,10 +17,10 @@
 
 #include "multifs.h"
 
+#include <fuse_opt.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <fuse/fuse_opt.h>
 
 enum {
 	KEY_VERSION,
