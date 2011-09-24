@@ -17,6 +17,7 @@
 #ifndef BYTESEX_H
 #define BYTESEX_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /*

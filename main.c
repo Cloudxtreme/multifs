@@ -47,7 +47,7 @@ multifs_opts[] = {
 /*
  * Display a friendly usage message
  */
-noreturn static void
+NORETURN static void
 usage(void)
 {
 	struct fuse_args args;

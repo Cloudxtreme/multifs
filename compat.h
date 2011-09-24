@@ -26,11 +26,13 @@
 #endif
 
 #ifdef __GNUC__
-# define noreturn	__attribute__ ((noreturn))
-# define idempotent	__attribute__ ((const))
+# define NORETURN	__attribute__ ((noreturn))
+# define IDEMPOTENT	__attribute__ ((const))
+# define UNUSED(x)	unused_ ## x __attribute__ ((unused))
 #else
-# define noreturn
-# define idempotent
+# define NORETURN
+# define IDEMPOTENT
+# define UNUSED(x)	unused_ ## x
 #endif
 
 /*

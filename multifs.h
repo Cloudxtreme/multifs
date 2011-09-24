@@ -19,6 +19,8 @@
 #define MULTIFS_H
 
 #include "compat.h"
+#include "hash.h"
+#include "pack.h"
 
 #include <assert.h>
 #include <stdarg.h>
@@ -27,8 +29,6 @@
 #include <stdint.h>
 #include <sys/param.h>
 #include <sys/types.h>
-
-#define UNUSED(x)		unused_ ## x __attribute__ ((unused))
 
 #define nitems(arr)		(sizeof(arr) / sizeof((arr)[0]))
 #define min(a, b)		((a) < (b)? (a) : (b))
@@ -101,19 +101,6 @@ enum msg {
 int		 multifs_main(int, char *[], struct multifs *);
 int		 multifs_process(struct multifs *, enum msg, const char *, size_t);
 
-/* pack.c */
-ssize_t		 vpack(char *, const size_t, const char *, va_list);
-ssize_t		 pack(char *, const size_t, const char *, ...);
-ssize_t		 vunpack(const char *, const size_t, const char *, va_list);
-ssize_t		 unpack(const char *, const size_t, const char *, ...);
-
-/* hash.c */
-typedef struct {
-	uint64_t high, low;
-} hashval_t;
-
-hashval_t	 hash(const uint8_t *, const size_t, const uint64_t);
-
 /* net.c */
 void		 net_init(struct multifs *);
 int		 net_send(int, enum msg, const char *, ...);
@@ -137,11 +124,11 @@ void		 warn(const char *, ...);
 void		 vwarnx(const char *, va_list);
 void		 warnx(const char *, ...);
 
-noreturn void	 verrc(int, int, const char *, va_list);
-noreturn void	 errc(int, int, const char *, ...);
-noreturn void	 verr(int, const char *, va_list);
-noreturn void	 err(int, const char *, ...);
-noreturn void	 verrx(int, const char *, va_list);
-noreturn void	 errx(int, const char *, ...);
+NORETURN void	 verrc(int, int, const char *, va_list);
+NORETURN void	 errc(int, int, const char *, ...);
+NORETURN void	 verr(int, const char *, va_list);
+NORETURN void	 err(int, const char *, ...);
+NORETURN void	 verrx(int, const char *, va_list);
+NORETURN void	 errx(int, const char *, ...);
 
 #endif /* MULTIFS_H */

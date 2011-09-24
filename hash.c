@@ -14,11 +14,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "multifs.h"
+#include "hash.h"
+#include "compat.h"
 #include "bytesex.h"
-
-#include <string.h>
-#include <arpa/inet.h>
 
 /*
  * This is basically MurmurHash3 wrung through my own code readability

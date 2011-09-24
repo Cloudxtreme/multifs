@@ -15,12 +15,15 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "multifs.h"
+#include "pack.h"
+#include "compat.h"
 #include "bytesex.h"
 
 #include <errno.h>
-#include <stdlib.h>
 #include <string.h>
+
+#define min(a, b)	((a) < (b)? (a) : (b))
+#define max(a, b)	((a) < (b)? (b) : (a))
 
 #define be8get(p)	(*(const uint8_t *) (p))
 #define be8put(p, v)	(*(uint8_t *) (p) = (v))
