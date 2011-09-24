@@ -26,6 +26,7 @@
 
 #include <alloca.h>
 #include <errno.h>
+#include <ifaddrs.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,11 +51,15 @@
 /* size of the packet header */
 #define HEADERSZ	(1 + 1 + sizeof(uint16_t) + sizeof(uint64_t))
 
+/* unknown sequence */
+#define UNKNOWN_SEQUENCE UINT64_MAX
+
 /* token state */
 enum state {
+	STATE_ASKING_TOKEN,	/* we're asking for the token */
+	STATE_ASKING_TOKEN2,	/* still asking */
 	STATE_SEARCHING_TOKEN,	/* we're searching for the token */
 	STATE_SEARCHING_TOKEN2,	/* still searching */
-	STATE_ASKING_TOKEN,	/* we're asking for the token */
 	STATE_FOUND_TOKEN,	/* we know where the token is */
 	STATE_HAS_TOKEN,	/* we have the token */
 	STATE_WITHOUT_TIMEOUT	= STATE_FOUND_TOKEN
@@ -198,7 +203,8 @@ make_socket(int port)
  * Create the multicast address for the specified name and port
  */
 static void
-make_addr(const char *restrict name, size_t namelen, int port, struct sockaddr_in6 *sin6)
+make_addr(const char *restrict name, size_t namelen, int port,
+          struct sockaddr_in6 *sin6)
 {
 	hashval_t h;
 
@@ -232,6 +238,37 @@ make_multicast(int mcastfd, const struct sockaddr_in6 *addr)
 	mreq.ipv6mr_interface = 0;
 	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) < 0)
 		err(1, "setsockopt(IPV6_JOIN_GROUP)");
+}
+
+/*
+ * Get own address.
+ */
+static void
+getmyaddr(struct in6_addr *self)
+{
+	struct ifaddrs *ifap, *i;
+
+	if (getifaddrs(&ifap) < 0)
+		err(1, "getifaddrs");
+
+	for (i = ifap; i != NULL; i = i->ifa_next) {
+		const struct in6_addr *addr;
+
+		/* skip non-IPv6 interfaces */
+		if (i->ifa_addr->sa_family != AF_INET6)
+			continue;
+
+		/* skip local addresses */
+		addr = &((struct sockaddr_in6 *) i->ifa_addr)->sin6_addr;
+		if (IN6_IS_ADDR_LOOPBACK(addr) || IN6_IS_ADDR_LINKLOCAL(addr))
+			continue;
+
+		/* get the address */
+		*self = ((struct sockaddr_in6 *) i->ifa_addr)->sin6_addr;
+		break;
+	}
+
+	freeifaddrs(ifap);
 }
 
 /*
@@ -298,6 +335,14 @@ mcast_send_process(struct net *net, struct packet *packet)
 
 	assert(pack(NULL, 0, "bbwq", NET_VERSION, 0, 0, (uint64_t) 0) == HEADERSZ);
 
+	/* is this a token grant? */
+	if (packet->msg == MSG_TOKEN_GIVE) {
+		/* record the new owner */
+		unpack(packet->buf, packet->len, "*b",
+		    sizeof(net->owner), &net->owner);
+		net->state = STATE_FOUND_TOKEN;
+	}
+
 	/* create the header */
 	iov[0].iov_base = header;
 	iov[0].iov_len = pack(header, sizeof(header), "bbwq",
@@ -333,25 +378,33 @@ mcast_send_dequeue(struct net *net)
 	struct packet *packet;
 
 	/* do we have packets to send? */
-	if (!LIST_EMPTY(&net->waitq)) {
-		/* do we have the token? */
-		if (net->state == STATE_HAS_TOKEN) {
-			/* don't hog the network too much, other hosts might
-			 * want to talk as well */
-			for (i = 0; i < 10 && !LIST_EMPTY(&net->waitq); i++) {
-				/* remove a packet from the list */
-				packet = LIST_FIRST(&net->waitq, packetq);
-				LIST_REMOVE_FIRST(&net->waitq, packetq);
+	if (LIST_EMPTY(&net->waitq)) 
+		return;
 
-				/* give it a sequence number and send it */
-				packet->sequence = ++net->sequence;
-				mcast_send_process(net, packet);
-			}
-		} else if (net->state == STATE_FOUND_TOKEN) {
-			/* ask for the token */
-			net->state = STATE_ASKING_TOKEN;
-			mcast_send(net, MSG_TOKEN_ASK, "");
-		}
+	/* do we know where the token is? */
+	if (net->state == STATE_FOUND_TOKEN) {
+		/* ask for the token */
+		net->state = STATE_ASKING_TOKEN;
+		mcast_send(net, MSG_TOKEN_ASK, "");
+		return;
+	} else if (net->state != STATE_HAS_TOKEN) {
+		/* timeout() will solve this */
+		return;
+	}
+
+	/* don't hog the network too much */
+	for (i = 0;
+	     i < 10 &&
+	      !LIST_EMPTY(&net->waitq) &&
+	      net->state == STATE_HAS_TOKEN;
+	     i++) {
+		/* remove a packet from the list */
+		packet = LIST_FIRST(&net->waitq, packetq);
+		LIST_REMOVE_FIRST(&net->waitq, packetq);
+
+		/* give it a sequence number and send it */
+		packet->sequence = ++net->sequence;
+		mcast_send_process(net, packet);
 	}
 }
 
@@ -427,16 +480,6 @@ mcast_recv_process(struct net *net, struct packet *packet)
 {
 	char buf1[MAX6ADDR], buf2[MAX6ADDR];
 
-	/* log spurious packets with sequence from hosts not holding the token */
-	if (packet->msg >= MSG_WITH_SEQUENCE &&
-	    memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
-		warnx("mcast_recv_process: packet with sequence not from token owner");
-		goto out;
-	}
-
-	/* update the sequence */
-	net->sequence = packet->sequence;
-
 	/* process the packet */
 	switch (packet->msg) {
 	case MSG_TOKEN_WHERE:
@@ -460,14 +503,10 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		break;
 
 	case MSG_TOKEN_ASK:	/* somebody's requesting the token */
+		/* if we have the token, grant it */
 		if (net->state == STATE_HAS_TOKEN) {
-			/* we have the token, so grant it */
 			mcast_send(net, MSG_TOKEN_GIVE, "*b",
 			    sizeof(packet->from), &packet->from);
-
-			/* record the new owner */
-			net->owner = packet->from;
-			net->state = STATE_FOUND_TOKEN;
 		}
 		break;
 
@@ -486,7 +525,6 @@ mcast_recv_process(struct net *net, struct packet *packet)
 			warnx("mcast_recv_process: unknown message %d", packet->msg);
 	}
 
-out:
 	free(packet);
 }
 
@@ -504,6 +542,19 @@ mcast_recv_dequeue(struct net *net)
 		/* take off the packet */
 		packet = LIST_FIRST(&net->recvq, packetq);
 		LIST_REMOVE_FIRST(&net->recvq, packetq);
+
+		/* log spurious packets with sequence from hosts not holding
+		 * the token */
+		if (memcmp(&net->owner, &packet->from,
+		    sizeof(net->owner)) != 0) {
+			warnx("mcast_recv_process: packet with sequence not "
+			    "from token owner");
+			free(packet);
+			continue;
+		}
+
+		/* update the sequence */
+		net->sequence = packet->sequence;
 
 		/* process the packet */
 		mcast_recv_process(net, packet);
@@ -552,21 +603,21 @@ mcast_recv(struct net *net)
 
 		warnx("mcast_recv: packet too small (%d) from %s",
 		    len, net_addr(net, &from));
+
 		return;
 	}
 
 	len -= sizeof(header);
 
 	/* allocate memory for the packet */
-	packet = malloc((sizeof(*packet) - sizeof(packet->buf)) + len);
+	packet = malloc(offsetof(struct packet, buf) + len);
 	if (packet == NULL) {
 		warn("mcast_recv: malloc(%zu)",
-		    (sizeof(*packet) - sizeof(packet->buf)) + len);
+		    offsetof(struct packet, buf) + len);
 		return;
 	}
 
 	/* set up structures */
-	memset(header, '\0', sizeof(header));
 	iov[0].iov_base = header;
 	iov[0].iov_len = sizeof(header);
 	iov[1].iov_base = packet->buf;
@@ -613,8 +664,12 @@ mcast_recv(struct net *net)
 
 	/* must this packet be processed in-sequence? */
 	if (packet->msg >= MSG_WITH_SEQUENCE) {
+		/* is the sequence as of yet unknown? */
+		if (net->sequence == UNKNOWN_SEQUENCE)
+			net->sequence = packet->sequence - 1;
+
 		/* is this a resend of a packet we have already processed? */
-		if (packet->sequence <= net->sequence)
+		else if (packet->sequence <= net->sequence)
 			goto out;
 
 		mcast_recv_queue(net, packet);
@@ -722,6 +777,21 @@ static void
 timeout(struct net *net)
 {
 	switch (net->state) {
+	case STATE_ASKING_TOKEN:
+		mcast_send(net, MSG_TOKEN_ASK, "");
+		net->state++;
+		break;
+
+	case STATE_ASKING_TOKEN2:
+		mcast_send(net, MSG_TOKEN_WHERE, "");
+		net->state++;
+		break;
+
+	case STATE_SEARCHING_TOKEN:
+		mcast_send(net, MSG_TOKEN_WHERE, "");
+		net->state++;
+		break;
+
 	case STATE_SEARCHING_TOKEN2:
 		trace("token not found, taking ownership");
 
@@ -730,16 +800,6 @@ timeout(struct net *net)
 		mcast_send(net, MSG_TOKEN_HERE, "");
 		net->state = STATE_HAS_TOKEN;
 		net->owner = net->self;
-		break;
-
-	case STATE_SEARCHING_TOKEN:
-	case STATE_ASKING_TOKEN:
-		/* no response for our token request, search for it */
-		mcast_send(net, MSG_TOKEN_WHERE, "");
-		if (net->state == STATE_SEARCHING_TOKEN)
-			net->state = STATE_SEARCHING_TOKEN2;
-		else
-			net->state = STATE_SEARCHING_TOKEN;
 		break;
 
 	default:
@@ -768,6 +828,8 @@ net_init(struct multifs *multifs)
 	memset(&net, '\0', sizeof(net));
 	net.multifs = multifs;
 	net.mcastfd = make_socket(NET_PORT);
+	net.sequence = UNKNOWN_SEQUENCE;
+	getmyaddr(&net.self);
 
 	/* set it to multicast */
 	make_addr(multifs->fsname, multifs->fsnamelen, NET_PORT, &net.multicast);
@@ -837,8 +899,10 @@ net_init(struct multifs *multifs)
 		rfds = fds;
 		n = select(nfds, &rfds, NULL, NULL,
 		    net.state >= STATE_WITHOUT_TIMEOUT? NULL : &tv);
-		if (n < 0)
+		if (n < 0) {
 			warn("select");
+			continue;
+		}
 
 		/* handle timeouts */
 		if (n == 0) {
@@ -853,12 +917,9 @@ net_init(struct multifs *multifs)
 				mcast_recv(&net);
 		}
 
-		/* process the incoming packet queue */
+		/* process packet queues */
 		mcast_recv_dequeue(&net);
-
-		/* process the outgoing queue */
-		if (!LIST_EMPTY(&net.waitq))
-			mcast_send_dequeue(&net);
+		mcast_send_dequeue(&net);
 	}
 
 	exit(0);
