@@ -241,8 +241,8 @@ multifs_mkdir(const char *path, mode_t mode)
 	int r;
 
 	/* broadcast the change */
-	net_send(multifs->netfd, MSG_DIR_CREATE, "sw",
-	    strlen(path), path, (int) mode);
+	net_send(multifs->netfd, MSG_DIR_CREATE, "s",
+	    strlen(path), path, mode & (S_IXUSR | S_IXGRP | S_IXOTH)? 1 : 0);
 
 	/* create the directory */ 
 	path = fullpath(multifs, path);
@@ -331,12 +331,48 @@ multifs_releasedir(const char *UNUSED(path), struct fuse_file_info *fi)
  ***************************************************************************/
 
 static int
+multifs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
+{
+	char *fp;
+
+	fp = fullpath(multifs, path);
+
+	/* attempt to create the file */
+	fi->fh = open(fp, fi->flags | O_CREAT | O_EXCL, canonmode(mode));
+	if ((int) fi->fh >= 0) {
+		/* we've just created the file */
+		net_send(multifs->netfd, MSG_FILE_CREATE, "sb",
+		    strlen(path), path,
+		    mode & (S_IXUSR | S_IXGRP | S_IXOTH)? 1 : 0);
+		goto out;
+	}
+
+	/* just open the file */
+	fi->fh = open(fp, fi->flags);
+
+out:
+	free((void *) fp);
+
+	if ((int) fi->fh < 0)
+		return -errno;
+
+	/* enable direct I/O if we're only reading */
+	fi->direct_io = (fi->flags & O_ACCMODE) == O_RDONLY;
+
+	return 0;
+}
+
+static int
 multifs_open(const char *path, struct fuse_file_info *fi)
 {
-	/* attempt to open the file */
-	path = fullpath(multifs, path);
-	fi->fh = open(path, fi->flags);
-	free((void *) path);
+	char *fp;
+
+	assert(!(fi->flags & O_CREAT));
+
+	/* just open the file */
+	fp = fullpath(multifs, path);
+	fi->fh = open(fp, fi->flags);
+	free((void *) fp);
 
 	if ((int) fi->fh < 0)
 		return -errno;
@@ -477,6 +513,7 @@ multifs_ops = {
 	.releasedir	= multifs_releasedir,
 
 	/* files */
+	.create		= multifs_create,
 	.open		= multifs_open,
 	.truncate	= multifs_truncate,
 	.link		= multifs_link,
@@ -548,6 +585,25 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 		break;
 	}
 
+	case MSG_FILE_CREATE: {
+		uint8_t exec;
+		int fd;
+
+		/* get the executable flag */
+		r = unpack(buf, len, "b", &exec);
+		if (r < 0)
+			goto bad_unpack;
+
+		/* create the file */
+		fd = open(path, O_CREAT | O_EXCL | O_TRUNC,
+		    canonmode(exec? S_IXUSR : 0));
+		if (fd < 0)
+			r = -1;
+		else
+			close(fd);
+		break;
+	}
+
 	case MSG_FILE_TRUNCATE: {
 		uint64_t length;
 
@@ -585,15 +641,8 @@ multifs_process(struct multifs *multifs, enum msg msg, const char *buf, size_t l
 	}
 
 	case MSG_DIR_CREATE: {
-		uint16_t mode;
-
-		/* get the mode */
-		r = unpack(buf, len, "w", &mode);
-		if (r < 0)
-			goto bad_unpack;
-
 		/* create the directory */
-		r = mkdir(path, mode);
+		r = mkdir(path, canonmode(S_IFDIR) & ~S_IFMT);
 		break;
 	}
 
