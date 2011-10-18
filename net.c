@@ -15,11 +15,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * TODO:
- * - resends (request and acknowledge)
- */
-
 #include "multifs.h"
 #include "list.h"
 #include "bytesex.h"
@@ -314,22 +309,72 @@ net_addr(struct net *net, const struct sockaddr_in6 *sin6)
 	return net->ipbuf;
 }
 
+/*
+ * Does sending a packet need the token?
+ */
+static bool
+needs_token(const struct packet *packet)
+{
+	return packet->msg >= MSG_WITH_SEQUENCE &&
+	       packet->sequence == UNKNOWN_SEQUENCE;
+}
+
 
 /***************************************************************************
  *** Sending multicast packets *********************************************
  ***************************************************************************/
 
 /*
- * Queue a packet waiting to be sent
+ * Place a packet to be sent into the queue
  */
 static void
 mcast_send_queue(struct net *net, struct packet *packet)
 {
-	LIST_INSERT_LAST(&net->waitq, packet, packetq);
+	if (!needs_token(packet))
+		LIST_INSERT_FIRST(&net->waitq, packet, packetq);		
+	else
+		LIST_INSERT_LAST(&net->waitq, packet, packetq);
 }
 
 /*
- * Process a packet to be sent
+ * Place a message to be sent into the queue
+ */
+static void
+mcast_send_msg(struct net *net, enum msg msg, const char *fmt, ...)
+{
+	va_list ap;
+	size_t len;
+	struct packet *packet;
+
+	/* determine required packet length */
+	va_start(ap, fmt);
+	len = vpack(NULL, 0, fmt, ap);
+	va_end(ap);
+
+	/* allocate memory for the packet */
+	packet = malloc(offsetof(struct packet, buf) + len);
+	if (packet == NULL) {
+		warning("mcast_send: malloc(%zu)", sizeof(*packet) - sizeof(packet->buf) + len);
+		return;
+	}
+
+	/* initialise the packet */
+	memset(packet, '\0', offsetof(struct packet, buf));
+	packet->msg = msg;
+	packet->len = len;
+	packet->sequence = UNKNOWN_SEQUENCE;
+
+	/* pack the contents */
+	va_start(ap, fmt);
+	vpack(packet->buf, len, fmt, ap);
+	va_end(ap);
+
+	/* put it in the queue */
+	mcast_send_queue(net, packet);
+}
+
+/*
+ * Actually send a packet
  */
 static void
 mcast_send_process(struct net *net, struct packet *packet)
@@ -358,58 +403,55 @@ mcast_send_process(struct net *net, struct packet *packet)
 		warning("mcast_send_process: sendmsg");
 }
 
-static void
-mcast_send(struct net *net, enum msg msg, const char *fmt, ...);
-
 /*
- * Dequeue packets to be sent
+ * Send a packet
  */
 static void
-mcast_send_dequeue(struct net *net)
+mcast_send(struct net *net)
 {
 	struct packet *packet;
 
-	/* do we have packets to send? */
-	if (LIST_EMPTY(&net->waitq)) 
-		return;
+	packet = LIST_FIRST(&net->waitq, packetq);
 
-	/* do we know where the token is? */
-	if (net->state == STATE_FOUND_TOKEN) {
-		/* ask for the token */
+	/* does the next packet need the sequence? */
+	if (needs_token(packet) &&
+	    net->state == STATE_FOUND_TOKEN) {
+		/* we don't have the token, but we do know where it is, so
+		 * ask for it */
 		net->state = STATE_ASKING_TOKEN;
-		mcast_send(net, MSG_TOKEN_ASK, "");
-		return;
-	} else if (net->state != STATE_HAS_TOKEN) {
-		/* timeout() will solve this */
-		return;
+		mcast_send_msg(net, MSG_TOKEN_ASK, "");
+
+		/* this changes the packet to be sent */
+		packet = LIST_FIRST(&net->waitq, packetq);
 	}
 
-	/* empty the wait queue */
-	while (!LIST_EMPTY(&net->waitq) &&
-	    net->state == STATE_HAS_TOKEN) {
-		/* remove a packet from the list */
-		packet = LIST_FIRST(&net->waitq, packetq);
-		LIST_REMOVE_FIRST(&net->waitq, packetq);
+	/* remove from the list */
+	LIST_REMOVE_FIRST(&net->waitq, packetq);
 
-		/* is this a token grant? */
-		if (packet->msg == MSG_TOKEN_GIVE) {
-			/* record the new owner */
-			unpack(packet->buf, packet->len, "*b",
-			    sizeof(net->owner), &net->owner);
-			net->state = STATE_FOUND_TOKEN;
-		}
+	assert(net->state == STATE_HAS_TOKEN || !needs_token(packet));
 
-		/* give it a sequence number and send it */
+	/* is the next packet a token grant? */
+	if (packet->msg == MSG_TOKEN_GIVE) {
+		/* record the new owner */
+		unpack(packet->buf, packet->len, "*b",
+		    sizeof(net->owner), &net->owner);
+		net->state = STATE_FOUND_TOKEN;
+	}
+
+	/* give the packet a sequence number of needed */
+	if (packet->msg >= MSG_WITH_SEQUENCE &&
+	    packet->sequence == UNKNOWN_SEQUENCE) {
 		if (net->sequence == UNKNOWN_SEQUENCE)
 			net->sequence = 0;
 		packet->sequence = ++net->sequence;
-		mcast_send_process(net, packet);
-
-		/* place the packet on the list of sent packets, to be
-		 * expunged at a later moment */
-		LIST_INSERT_LAST(&net->sendq, packet, packetq);
-		net->sendqlen++;
 	}
+
+	/* send it */
+	mcast_send_process(net, packet);
+
+	/* place the packet on the list of sent packets */
+	LIST_INSERT_LAST(&net->sendq, packet, packetq);
+	net->sendqlen++;
 
 	/* reduce the length of the send queue */
 	if (net->sendqlen > MAXSENDQ * 2) {
@@ -419,47 +461,6 @@ mcast_send_dequeue(struct net *net)
 			free(packet);
 			net->sendqlen--;
 		}
-	}
-}
-
-/*
- * Send a packet
- */
-static void
-mcast_send(struct net *net, enum msg msg, const char *fmt, ...)
-{
-	va_list ap;
-	size_t len;
-	struct packet *packet;
-
-	/* determine required packet length */
-	va_start(ap, fmt);
-	len = vpack(NULL, 0, fmt, ap);
-	va_end(ap);
-
-	/* allocate memory for the packet */
-	packet = malloc(sizeof(*packet) - sizeof(packet->buf) + len);
-	if (packet == NULL) {
-		warning("mcast_send: malloc(%zu)", sizeof(*packet) - sizeof(packet->buf) + len);
-		return;
-	}
-
-	/* initialise the packet */
-	memset(packet, '\0', offsetof(struct packet, buf));
-	packet->msg = msg;
-	packet->len = len;
-
-	/* pack the contents */
-	va_start(ap, fmt);
-	vpack(packet->buf, len, fmt, ap);
-	va_end(ap);
-
-	/* must this packet be processed in-sequence? */
-	if (packet->msg >= MSG_WITH_SEQUENCE) {
-		mcast_send_queue(net, packet);
-	} else {
-		mcast_send_process(net, packet);
-		free(packet);
 	}
 }
 
@@ -481,7 +482,7 @@ mcast_recv_resend(struct net *net)
 		for (sequence = net->sequence + 1;
 		     sequence < LIST_FIRST(&net->recvq, packetq)->sequence;
 		     sequence++)
-			mcast_send(net, MSG_RESEND, "q", sequence);
+			mcast_send_msg(net, MSG_RESEND, "q", sequence);
 	}
 }
 
@@ -527,8 +528,9 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		/* check if the packet is in our send queue */
 		LIST_FOREACH(sent, &net->sendq, packetq) {
 			if (sent->sequence == sequence) {
-				/* resend it */
-				mcast_send_process(net, sent);
+				LIST_REMOVE(&net->sendq, sent, packetq);
+				net->sendqlen--;
+				mcast_send_queue(net, sent);
 				break;
 			}
 		}
@@ -538,7 +540,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 	case MSG_TOKEN_WHERE:
 		if (net->state == STATE_HAS_TOKEN)
 			/* we have the token; tell the others so */
-			mcast_send(net, MSG_TOKEN_HERE, "");
+			mcast_send_msg(net, MSG_TOKEN_HERE, "");
 		break;
 
 	case MSG_TOKEN_HERE:
@@ -558,7 +560,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 	case MSG_TOKEN_ASK:	/* somebody's requesting the token */
 		/* if we have the token, grant it */
 		if (net->state == STATE_HAS_TOKEN) {
-			mcast_send(net, MSG_TOKEN_GIVE, "*b",
+			mcast_send_msg(net, MSG_TOKEN_GIVE, "*b",
 			    sizeof(packet->from), &packet->from);
 		}
 		break;
@@ -774,6 +776,7 @@ fs_recv(struct net *net)
 	/* initialise the packet */
 	memset(packet, '\0', offsetof(struct packet, buf));
 	packet->len = len;
+	packet->sequence = UNKNOWN_SEQUENCE;
 
 	/* set up structures */
 	iov[0].iov_base = &packet->msg;
@@ -788,11 +791,8 @@ fs_recv(struct net *net)
 		return;
 	}
 
-	/* must this packet be processed in-sequence? */
-	if (packet->msg >= MSG_WITH_SEQUENCE)
-		mcast_send_queue(net, packet);
-	else
-		mcast_send_process(net, packet);
+	/* queue the packet */
+	mcast_send_queue(net, packet);
 }
 
 /*
@@ -836,17 +836,17 @@ timeout(struct net *net)
 {
 	switch (net->state) {
 	case STATE_ASKING_TOKEN:
-		mcast_send(net, MSG_TOKEN_ASK, "");
+		mcast_send_msg(net, MSG_TOKEN_ASK, "");
 		net->state++;
 		break;
 
 	case STATE_ASKING_TOKEN2:
-		mcast_send(net, MSG_TOKEN_WHERE, "");
+		mcast_send_msg(net, MSG_TOKEN_WHERE, "");
 		net->state++;
 		break;
 
 	case STATE_SEARCHING_TOKEN:
-		mcast_send(net, MSG_TOKEN_WHERE, "");
+		mcast_send_msg(net, MSG_TOKEN_WHERE, "");
 		net->state++;
 		break;
 
@@ -855,7 +855,7 @@ timeout(struct net *net)
 
 		/* nobody responded on our request, so unilaterally declare
 		 * that we have the token (ie. steal it) */
-		mcast_send(net, MSG_TOKEN_HERE, "");
+		mcast_send_msg(net, MSG_TOKEN_HERE, "");
 		net->state = STATE_HAS_TOKEN;
 		net->owner = net->self;
 		break;
@@ -869,6 +869,66 @@ timeout(struct net *net)
 	mcast_recv_resend(net);
 }
 
+
+/***************************************************************************
+ *** Run loop **************************************************************
+ ***************************************************************************/
+
+static void
+process(struct net *net)
+{
+	fd_set rfds, wfds, *wfdp = NULL;
+	struct timeval to = { .tv_sec = 2, .tv_usec = 0 }, *tv = NULL;
+	int nfds, n;
+
+	/* determine which fds to monitor */
+	FD_ZERO(&rfds);
+	FD_SET(net->fsfd, &rfds);
+	FD_SET(net->mcastfd, &rfds);
+	nfds = max(net->fsfd, net->mcastfd) + 1;
+
+	if (!LIST_EMPTY(&net->waitq) &&
+	    (!needs_token(LIST_FIRST(&net->waitq, packetq)) ||
+	     net->state >= STATE_FOUND_TOKEN)) {
+		FD_ZERO(&wfds);
+		FD_SET(net->mcastfd, &wfds);
+		wfdp = &wfds;
+	}
+
+	/* determine if we need a timeout */
+	if (net->state < STATE_WITHOUT_TIMEOUT ||
+	    !LIST_EMPTY(&net->recvq))
+		tv = &to;
+
+	/* wait for an event */
+	n = select(nfds, &rfds, wfdp, NULL, tv);
+	if (n < 0) {
+		warning("select");
+		return;
+	}
+
+	/* handle timeouts */
+	if (n == 0) {
+		timeout(net);
+	} else {
+		/* handle incoming traffic */
+		if (FD_ISSET(net->fsfd, &rfds))
+			fs_recv(net);
+		if (FD_ISSET(net->mcastfd, &rfds))
+			mcast_recv(net);
+
+		/* process receive queue */
+		mcast_recv_dequeue(net);
+
+		/* handle outgoing traffic */
+		if (wfdp != NULL &&
+		    FD_ISSET(net->mcastfd, &wfds))
+			mcast_send(net);
+	}
+
+}
+
+
 /***************************************************************************
  *** Initialisation and main loop ******************************************
  ***************************************************************************/
@@ -879,9 +939,8 @@ timeout(struct net *net)
 void
 net_init(struct multifs *multifs)
 {
-	int fd[2], nfds;
+	int fd[2];
 	struct net net;
-	fd_set fds;
 	socklen_t socklen;
 
 	/* create the server socket */
@@ -941,50 +1000,11 @@ net_init(struct multifs *multifs)
 
 	/* try to find out who has the token */
 	net.state = STATE_SEARCHING_TOKEN;
-	mcast_send(&net, MSG_TOKEN_WHERE, "");
-
-	/* set up select */
-	FD_ZERO(&fds);
-	FD_SET(net.fsfd, &fds);
-	FD_SET(net.mcastfd, &fds);
-	nfds = max(net.mcastfd, net.fsfd) + 1;
+	mcast_send_msg(&net, MSG_TOKEN_WHERE, "");
 
 	/* process socket events */
-	while (!net.exit) {
-		int n;
-		fd_set rfds;
-
-		/* wait for an event */
-		rfds = fds;
-		if (net.state < STATE_WITHOUT_TIMEOUT ||
-		    !LIST_EMPTY(&net.recvq)) {
-			struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-			n = select(nfds, &rfds, NULL, NULL, &tv);
-		} else {
-			n = select(nfds, &rfds, NULL, NULL, NULL);
-		}
-		if (n < 0) {
-			warning("select");
-			continue;
-		}
-
-		/* handle timeouts */
-		if (n == 0) {
-			timeout(&net);
-		} else {
-			/* handle changes from the fuse worker(s) */
-			if (FD_ISSET(net.fsfd, &rfds))
-				fs_recv(&net);
-
-			/* handle incoming packets */
-			if (FD_ISSET(net.mcastfd, &rfds))
-				mcast_recv(&net);
-		}
-
-		/* process packet queues */
-		mcast_recv_dequeue(&net);
-		mcast_send_dequeue(&net);
-	}
+	while (!net.exit)
+		process(&net);
 
 	exit(0);
 }
