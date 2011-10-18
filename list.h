@@ -77,6 +77,7 @@
 			LIST_PREV(LIST_FIRST(head, field), field) = (entry);\
 		else                                                        \
 			LIST_LAST(head, field) = (entry);                   \
+		LIST_PREV(entry, field) = NULL;                             \
 		LIST_NEXT(entry, field) = LIST_FIRST(head, field);          \
 		LIST_FIRST(head, field) = (entry);                          \
 	} while (0)
@@ -87,6 +88,7 @@
 		else                                                        \
 			LIST_FIRST(head, field) = (entry);                  \
 		LIST_PREV(entry, field) = LIST_LAST(head, field);           \
+		LIST_NEXT(entry, field) = NULL;                             \
 		LIST_LAST(head, field) = (entry);                           \
 	} while (0)
 #define LIST_INSERT_BEFORE(head, pos, entry, field)                         \
