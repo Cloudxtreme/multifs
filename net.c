@@ -85,17 +85,18 @@ struct net {
 	struct in6_addr		 self,
 				 owner;
 	char			 ipbuf[64];
-	LIST_HEAD(, packet)	 waitq,		/* packets still to be sent,
+	LIST_HEAD(, packet)	 sendq,		/* packets still to be sent,
 						 * waiting for us to gain
 						 * the token */
-				 sendq;		/* packets already sent,
+				 resendq;	/* packets already sent,
 				 		 * being kept around to
 				 		 * service NACKs */
-	unsigned int		 sendqlen;	/* length of the sendq */
 	LIST_HEAD(, packet)	 recvq;		/* packets received but not
 						 * yet processed (eg.
 						 * because they were
 						 * received out-of-sequence */
+	unsigned int		 sendqlen;	/* length of the sendq */
+	unsigned int		 resendqlen;	/* length of the resendq */
 	unsigned int		 recvqlen;	/* length of the recvq */
 };
 
@@ -331,9 +332,10 @@ static void
 mcast_send_queue(struct net *net, struct packet *packet)
 {
 	if (!needs_token(packet))
-		LIST_INSERT_FIRST(&net->waitq, packet, packetq);		
+		LIST_INSERT_FIRST(&net->sendq, packet, packetq);		
 	else
-		LIST_INSERT_LAST(&net->waitq, packet, packetq);
+		LIST_INSERT_LAST(&net->sendq, packet, packetq);
+	net->sendqlen++;
 }
 
 /*
@@ -411,7 +413,7 @@ mcast_send(struct net *net)
 {
 	struct packet *packet;
 
-	packet = LIST_FIRST(&net->waitq, packetq);
+	packet = LIST_FIRST(&net->sendq, packetq);
 
 	/* does the next packet need the sequence? */
 	if (needs_token(packet) &&
@@ -422,11 +424,12 @@ mcast_send(struct net *net)
 		mcast_send_msg(net, MSG_TOKEN_ASK, "");
 
 		/* this changes the packet to be sent */
-		packet = LIST_FIRST(&net->waitq, packetq);
+		packet = LIST_FIRST(&net->sendq, packetq);
 	}
 
 	/* remove from the list */
-	LIST_REMOVE_FIRST(&net->waitq, packetq);
+	LIST_REMOVE_FIRST(&net->sendq, packetq);
+	net->sendqlen--;
 
 	assert(net->state == STATE_HAS_TOKEN || !needs_token(packet));
 
@@ -450,16 +453,15 @@ mcast_send(struct net *net)
 	mcast_send_process(net, packet);
 
 	/* place the packet on the list of sent packets */
-	LIST_INSERT_LAST(&net->sendq, packet, packetq);
-	net->sendqlen++;
-
-	/* reduce the length of the send queue */
-	if (net->sendqlen > MAXSENDQ * 2) {
-		while (net->sendqlen > MAXSENDQ) {
-			packet = LIST_FIRST(&net->sendq, packetq);
-			LIST_REMOVE_FIRST(&net->sendq, packetq);
+	LIST_INSERT_LAST(&net->resendq, packet, packetq);
+	net->resendqlen++;
+	if (net->resendqlen > MAXSENDQ * 2) {
+		/* reduce queue length */
+		while (net->resendqlen > MAXSENDQ) {
+			packet = LIST_FIRST(&net->resendq, packetq);
+			LIST_REMOVE_FIRST(&net->resendq, packetq);
 			free(packet);
-			net->sendqlen--;
+			net->resendqlen--;
 		}
 	}
 }
@@ -525,11 +527,11 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		if (unpack(packet->buf, packet->len, "q", &sequence) < 0)
 			warning("mcast_recv_process: unpack");
 
-		/* check if the packet is in our send queue */
-		LIST_FOREACH(sent, &net->sendq, packetq) {
+		/* check if we have the packet */
+		LIST_FOREACH(sent, &net->resendq, packetq) {
 			if (sent->sequence == sequence) {
-				LIST_REMOVE(&net->sendq, sent, packetq);
-				net->sendqlen--;
+				LIST_REMOVE(&net->resendq, sent, packetq);
+				net->resendqlen--;
 				mcast_send_queue(net, sent);
 				break;
 			}
@@ -878,17 +880,22 @@ static void
 process(struct net *net)
 {
 	fd_set rfds, wfds, *wfdp = NULL;
-	struct timeval to = { .tv_sec = 2, .tv_usec = 0 }, *tv = NULL;
+	struct timeval to, *tv = NULL;
 	int nfds, n;
 
-	/* determine which fds to monitor */
 	FD_ZERO(&rfds);
-	FD_SET(net->fsfd, &rfds);
 	FD_SET(net->mcastfd, &rfds);
-	nfds = max(net->fsfd, net->mcastfd) + 1;
+	nfds = net->mcastfd + 1;
 
-	if (!LIST_EMPTY(&net->waitq) &&
-	    (!needs_token(LIST_FIRST(&net->waitq, packetq)) ||
+	/* receive messages from the fuse worker? */
+	if (net->sendqlen < MAXSENDQ) {
+		FD_SET(net->fsfd, &rfds);
+		nfds = max(nfds, net->fsfd + 1);
+	}
+
+	/* do we have something to send? */
+	if (!LIST_EMPTY(&net->sendq) &&
+	    (!needs_token(LIST_FIRST(&net->sendq, packetq)) ||
 	     net->state >= STATE_FOUND_TOKEN)) {
 		FD_ZERO(&wfds);
 		FD_SET(net->mcastfd, &wfds);
@@ -897,8 +904,11 @@ process(struct net *net)
 
 	/* determine if we need a timeout */
 	if (net->state < STATE_WITHOUT_TIMEOUT ||
-	    !LIST_EMPTY(&net->recvq))
+	    !LIST_EMPTY(&net->recvq)) {
+		to.tv_sec = 2;
+		to.tv_usec = 0;
 		tv = &to;
+	}
 
 	/* wait for an event */
 	n = select(nfds, &rfds, wfdp, NULL, tv);
