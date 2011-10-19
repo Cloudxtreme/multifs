@@ -368,6 +368,11 @@ multifs_open(const char *path, struct fuse_file_info *fi)
 
 	assert(!(fi->flags & O_CREAT));
 
+	/* does the file need to be truncated? */
+	if (fi->flags & O_TRUNC)
+		net_send(multifs->netfd, MSG_FILE_TRUNCATE, "sq",
+		    strlen(path), path, (uint64_t) 0);
+
 	/* just open the file */
 	fp = fullpath(multifs, path);
 	fi->fh = open(fp, fi->flags);
