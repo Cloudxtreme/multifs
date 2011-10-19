@@ -96,6 +96,24 @@ multifs_destroy(void *UNUSED(data))
 }
 
 
+
+/***************************************************************************
+ *** Filesystem ************************************************************
+ ***************************************************************************/
+
+static int
+multifs_statfs(const char *UNUSED(path), struct statvfs *st)
+{
+	if (statvfs(multifs->fsroot, st))
+		return -errno;
+
+	st->f_flag = 0;
+	st->f_fsid = 0;
+
+	return 0;
+}
+
+
 /***************************************************************************
  *** Objects ***************************************************************
  ***************************************************************************/
@@ -501,6 +519,9 @@ multifs_ops = {
 	/* initialisation and destruction */
 	.init		= multifs_init,
 	.destroy	= multifs_destroy,
+
+	/* filesystem */
+	.statfs		= multifs_statfs,
 
 	/* objects */
 	.symlink	= multifs_symlink,
