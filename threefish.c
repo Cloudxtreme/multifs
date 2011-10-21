@@ -72,31 +72,34 @@ THREEFISH(rotate)[] = {
 };
 
 /*
+ * Initialise a context for use
+ */
+void
+THREEFISH(init)(struct threefish *ctx)
+{
+	unsigned int	 i;
+
+	ctx->key[nitems(ctx->key) - 1] = THREEFISH_KEY_PARITY;
+	for (i = 0; i < nitems(ctx->key) - 1; i++)
+		ctx->key[nitems(ctx->key) - 1] ^= ctx->key[i];
+
+	ctx->tweak[2] = ctx->tweak[0] ^ ctx->tweak[1];
+}
+
+/*
  * Encrypt a block
  */
 void
-THREEFISH(encrypt)(struct threefish *ctx, uint64_t *block)
+THREEFISH(encrypt)(const struct threefish *ctx, const uint64_t *in,
+                   uint64_t *out)
 {
-	uint64_t	 key[SKEIN_WORDS + 1],
-			 tweak[nitems(ctx->tweak) + 1],
-			 x[SKEIN_WORDS];
 	unsigned int	 i, r, s, a, b;
 
-	/* determine key parity */
-	memcpy(key, ctx->key, sizeof(ctx->key));
-	key[nitems(key) - 1] = THREEFISH_KEY_PARITY;
-	for (i = 0; i < nitems(key) - 1; i++)
-		key[nitems(key) - 1] ^= key[i];
-
-	/* determine tweak parity */
-	memcpy(tweak, ctx->tweak, sizeof(ctx->tweak));
-	tweak[2] = tweak[0] ^ tweak[1];
-
 	/* perform first key injection */
-	for (i = 0; i < nitems(x); i++)
-		x[i] = key[i] + block[i];
-	x[nitems(x) - 3] += tweak[0];
-	x[nitems(x) - 2] += tweak[1];
+	for (i = 0; i < SKEIN_WORDS; i++)
+		out[i] = ctx->key[i] + in[i];
+	out[SKEIN_WORDS - 3] += ctx->tweak[0];
+	out[SKEIN_WORDS - 2] += ctx->tweak[1];
 
 	/* perform all rounds */
 	for (r = 1, s = 0;
@@ -107,79 +110,55 @@ THREEFISH(encrypt)(struct threefish *ctx, uint64_t *block)
 			a = THREEFISH(schedule)[i * 2];
 			b = THREEFISH(schedule)[i * 2 + 1];
 
-			x[a] += x[b];
-			x[b] = rotl64(x[b], THREEFISH(rotate)[i + s]);
-			x[b] ^= x[a];
+			out[a] += out[b];
+			out[b] = rotl64(out[b], THREEFISH(rotate)[i + s]);
+			out[b] ^= out[a];
 		}
 
 		/* inject the key */
-		for (i = 0; i < nitems(x); i++)
-			x[i] += key[(r + i) % nitems(key)];
-		x[nitems(x) - 3] += tweak[r % nitems(tweak)];
-		x[nitems(x) - 2] += tweak[(r + 1) % nitems(tweak)];
-		x[nitems(x) - 1] += r;
+		for (i = 0; i < SKEIN_WORDS; i++)
+			out[i] += ctx->key[(r + i) % nitems(ctx->key)];
+		out[SKEIN_WORDS - 3] += ctx->tweak[r % nitems(ctx->tweak)];
+		out[SKEIN_WORDS - 2] += ctx->tweak[(r + 1) % nitems(ctx->tweak)];
+		out[SKEIN_WORDS - 1] += r;
 	}
-
-	/* update context */
-	for (i = 0; i < nitems(ctx->key); i++)
-		ctx->key[i] = x[i] ^ block[i];
-
-	memcpy(block, x, sizeof(x));
 }
 
 /*
  * Decrypt a block
  */
 void
-THREEFISH(decrypt)(struct threefish *ctx, uint64_t *block)
+THREEFISH(decrypt)(const struct threefish *ctx, const uint64_t *in,
+                   uint64_t *out)
 {
-	uint64_t	 key[SKEIN_WORDS + 1],
-			 tweak[nitems(ctx->tweak) + 1],
-			 x[SKEIN_WORDS];
 	unsigned int	 i, r, s, a, b;
 
-	memcpy(x, block, sizeof(x));
-
-	/* determine key parity */
-	memcpy(key, ctx->key, sizeof(ctx->key));
-	key[nitems(key) - 1] = THREEFISH_KEY_PARITY;
-	for (i = 0; i < nitems(key) - 1; i++)
-		key[nitems(key) - 1] ^= key[i];
-
-	/* determine tweak parity */
-	memcpy(tweak, ctx->tweak, sizeof(ctx->tweak));
-	tweak[2] = tweak[0] ^ tweak[1];
+	memcpy(out, in, SKEIN_BYTES);
 
 	/* perform all rounds */
 	for (r = THREEFISH_ROUNDS / 4, s = nitems(THREEFISH(rotate)) / 2;
 	     r > 0;
 	     r--, s ^= nitems(THREEFISH(rotate)) / 2) {
 		/* remove the key */
-		for (i = 0; i < nitems(x); i++)
-			x[i] -= key[(r + i) % nitems(key)];
-		x[nitems(x) - 3] -= tweak[r % nitems(tweak)];
-		x[nitems(x) - 2] -= tweak[(r + 1) % nitems(tweak)];
-		x[nitems(x) - 1] -= r;
+		for (i = 0; i < SKEIN_WORDS; i++)
+			out[i] -= ctx->key[(r + i) % nitems(ctx->key)];
+		out[SKEIN_WORDS - 3] -= ctx->tweak[r % nitems(ctx->tweak)];
+		out[SKEIN_WORDS - 2] -= ctx->tweak[(r + 1) % nitems(ctx->tweak)];
+		out[SKEIN_WORDS - 1] -= r;
 
 		/* perform rotations */
 		for (i = nitems(THREEFISH(schedule)) / 2; i > 0; i--) {
 			a = THREEFISH(schedule)[(i - 1) * 2];
 			b = THREEFISH(schedule)[(i - 1) * 2 + 1];
 
-			x[b] = rotr64(x[a] ^ x[b], THREEFISH(rotate)[(i - 1) + s]);
-			x[a] -= x[b];
+			out[b] = rotr64(out[a] ^ out[b], THREEFISH(rotate)[(i - 1) + s]);
+			out[a] -= out[b];
 		}
 	}
 
 	/* undo first key injection */
-	for (i = 0; i < nitems(x); i++)
-		x[i] -= key[i];
-	x[nitems(x) - 3] -= tweak[0];
-	x[nitems(x) - 2] -= tweak[1];
-
-	/* update context */
-	for (i = 0; i < nitems(ctx->key); i++)
-		ctx->key[i] = x[i] ^ block[i];
-
-	memcpy(block, x, sizeof(x));
+	for (i = 0; i < SKEIN_WORDS; i++)
+		out[i] -= ctx->key[i];
+	out[SKEIN_WORDS - 3] -= ctx->tweak[0];
+	out[SKEIN_WORDS - 2] -= ctx->tweak[1];
 }

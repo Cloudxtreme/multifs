@@ -20,18 +20,24 @@
 static void
 SKEIN(process)(struct skein *ctx, const uint8_t *buf, size_t blocks, size_t len)
 {
-	uint64_t block[SKEIN_WORDS];
+	uint64_t	 in[SKEIN_WORDS],
+			 out[SKEIN_WORDS];
+	unsigned int	 i;
 
 	while (blocks-- > 0) {
 		/* update length */
 		ctx->tf.tweak[0] += len;
 
 		/* get the block in host byteorder */
-		mle64get(block, buf, nitems(block));
-		buf += sizeof(block);
+		mle64get(in, buf, nitems(in));
+		buf += sizeof(in);
 
-		/* process it */
-		THREEFISH(encrypt)(&ctx->tf, block);
+		/* process it by using threefish in a Matyas-Meyer-Oseas
+		 * construction */
+		THREEFISH(init)(&ctx->tf);
+		THREEFISH(encrypt)(&ctx->tf, in, out);
+		for (i = 0; i < nitems(ctx->tf.key) - 1; i++)
+			ctx->tf.key[i] = out[i] ^ in[i];
 
 		/* clear the first flag */
 		ctx->tf.tweak[1] &= ~SKEIN_FLAG_FIRST;

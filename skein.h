@@ -24,34 +24,37 @@
  * 256-bit threefish
  */
 struct threefish256 {
-	uint64_t		 key[256 / (sizeof(uint64_t) * 8)];
-	uint64_t		 tweak[2];
+	uint64_t		 key[256 / (sizeof(uint64_t) * 8) + 1];
+	uint64_t		 tweak[3];
 };
 
-void	 threefish256_encrypt(struct threefish256 *, uint64_t *);
-void	 threefish256_decrypt(struct threefish256 *, uint64_t *);
+void	 threefish256_init(struct threefish256 *);
+void	 threefish256_encrypt(const struct threefish256 *, const uint64_t *, uint64_t *);
+void	 threefish256_decrypt(const struct threefish256 *, const uint64_t *, uint64_t *);
 
 /*
  * 512-bit threefish
  */
 struct threefish512 {
-	uint64_t		 key[512 / (sizeof(uint64_t) * 8)];
-	uint64_t		 tweak[2];
+	uint64_t		 key[512 / (sizeof(uint64_t) * 8) + 1];
+	uint64_t		 tweak[3];
 };
 
-void	 threefish512_encrypt(struct threefish512 *, uint64_t *);
-void	 threefish512_decrypt(struct threefish512 *, uint64_t *);
+void	 threefish512_init(struct threefish512 *);
+void	 threefish512_encrypt(const struct threefish512 *, const uint64_t *, uint64_t *);
+void	 threefish512_decrypt(const struct threefish512 *, const uint64_t *, uint64_t *);
 
 /*
  * 1024-bit threefish
  */
 struct threefish1024 {
-	uint64_t		 key[1024 / (sizeof(uint64_t) * 8)];
-	uint64_t		 tweak[2];
+	uint64_t		 key[1024 / (sizeof(uint64_t) * 8) + 1];
+	uint64_t		 tweak[3];
 };
 
-void	 threefish1024_encrypt(struct threefish1024 *, uint64_t *);
-void	 threefish1024_decrypt(struct threefish1024 *, uint64_t *);
+void	 threefish1024_init(struct threefish1024 *);
+void	 threefish1024_encrypt(const struct threefish1024 *, const uint64_t *, uint64_t *);
+void	 threefish1024_decrypt(const struct threefish1024 *, const uint64_t *, uint64_t *);
 
 
 /*
