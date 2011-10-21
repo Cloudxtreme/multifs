@@ -36,7 +36,7 @@ SKEIN(process)(struct skein *ctx, const uint8_t *buf, size_t blocks, size_t len)
 		 * construction */
 		THREEFISH(init)(&ctx->tf);
 		THREEFISH(encrypt)(&ctx->tf, in, out);
-		for (i = 0; i < nitems(ctx->tf.key) - 1; i++)
+		for (i = 0; i < SKEIN_WORDS; i++)
 			ctx->tf.key[i] = out[i] ^ in[i];
 
 		/* clear the first flag */
@@ -124,7 +124,7 @@ SKEIN(update)(struct skein *ctx, const uint8_t *buf, size_t len)
 void
 SKEIN(done)(struct skein *ctx, uint8_t *hash)
 {
-	uint64_t	 key[nitems(ctx->tf.key)];
+	uint64_t	 key[SKEIN_WORDS];
 	unsigned int	 i, bytes, n;
 
 	/* output last block */
@@ -154,7 +154,7 @@ SKEIN(done)(struct skein *ctx, uint8_t *hash)
 		hash += n;
 
 		/* restore the key for the next loop */
-		memcpy(ctx->tf.key, key, sizeof(ctx->tf.key));
+		memcpy(ctx->tf.key, key, sizeof(key));
 	}
 }
 
