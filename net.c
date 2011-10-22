@@ -40,6 +40,9 @@
 # include <sys/time.h>
 #endif
 
+#include <io/loop.h>
+#include <io/event.h>
+
 /* length of an IPv6 address encoded as a string, plus terminating NUL character */
 #define MAX6ADDR	40
 
@@ -76,9 +79,14 @@ struct packet {
 /* networking state */
 struct net {
 	struct multifs		*multifs;
-	bool			 exit;
 	int			 mcastfd;
 	int			 fsfd;
+	struct ioloop		*ioloop;
+	struct ioevent		*fs_recv_ev,
+				*mcast_recv_ev,
+				*mcast_send_ev,
+				*state_ev,
+				*resend_ev;
 	enum state		 state;
 	uint64_t		 sequence;
 	struct sockaddr_in6	 multicast;
@@ -97,7 +105,6 @@ struct net {
 						 * received out-of-sequence */
 	unsigned int		 sendqlen;	/* length of the sendq */
 	unsigned int		 resendqlen;	/* length of the resendq */
-	unsigned int		 recvqlen;	/* length of the recvq */
 };
 
 /* empty owner */
@@ -320,6 +327,20 @@ needs_token(const struct packet *packet)
 	       packet->sequence == UNKNOWN_SEQUENCE;
 }
 
+/*
+ * Set state
+ */
+static void
+set_state(struct net *net, enum state state)
+{
+	/* does this state require timeout processing? */
+	if (net->state >= STATE_WITHOUT_TIMEOUT &&
+	    state < STATE_WITHOUT_TIMEOUT)
+		ioevent_attach(net->state_ev, net->ioloop);
+
+	net->state = state;
+}
+
 
 /***************************************************************************
  *** Sending multicast packets *********************************************
@@ -331,11 +352,19 @@ needs_token(const struct packet *packet)
 static void
 mcast_send_queue(struct net *net, struct packet *packet)
 {
+	/* we have something to send */
+	if (LIST_EMPTY(&net->sendq))
+		ioevent_attach(net->mcast_send_ev, net->ioloop);
+
 	if (!needs_token(packet))
 		LIST_INSERT_FIRST(&net->sendq, packet, packetq);		
 	else
 		LIST_INSERT_LAST(&net->sendq, packet, packetq);
 	net->sendqlen++;
+
+	/* should we throttle the fuse worker? */
+	if (net->sendqlen == MAXSENDQ)
+		ioevent_detach(net->fs_recv_ev);
 }
 
 /*
@@ -409,27 +438,36 @@ mcast_send_process(struct net *net, struct packet *packet)
  * Send a packet
  */
 static void
-mcast_send(struct net *net)
+mcast_send(int UNUSED(dummy), struct net *net)
 {
 	struct packet *packet;
 
+	/* do we have something to send? */
 	packet = LIST_FIRST(&net->sendq, packetq);
+	if (packet == NULL)
+		goto detach;
 
-	/* does the next packet need the sequence? */
-	if (needs_token(packet) &&
-	    net->state == STATE_FOUND_TOKEN) {
-		/* we don't have the token, but we do know where it is, so
-		 * ask for it */
-		net->state = STATE_ASKING_TOKEN;
-		mcast_send_msg(net, MSG_TOKEN_ASK, "");
+	/* does the next packet need the token? */
+	if (needs_token(packet)) {
+		/* do we know where it is? */
+		if (net->state == STATE_FOUND_TOKEN) {
+			set_state(net, STATE_ASKING_TOKEN);
+			mcast_send_msg(net, MSG_TOKEN_ASK, "");
 
-		/* this changes the packet to be sent */
-		packet = LIST_FIRST(&net->sendq, packetq);
+			/* this changes the packet to be sent */
+			packet = LIST_FIRST(&net->sendq, packetq);
+		} else {
+			goto detach;
+		}
 	}
 
 	/* remove from the list */
 	LIST_REMOVE_FIRST(&net->sendq, packetq);
 	net->sendqlen--;
+
+	/* does this mean the fuse worker can be re-enabled? */
+	if (net->sendqlen == MAXSENDQ - 1)
+		ioevent_attach(net->fs_recv_ev, net->ioloop);
 
 	assert(net->state == STATE_HAS_TOKEN || !needs_token(packet));
 
@@ -438,7 +476,7 @@ mcast_send(struct net *net)
 		/* record the new owner */
 		unpack(packet->buf, packet->len, "*b",
 		    sizeof(net->owner), &net->owner);
-		net->state = STATE_FOUND_TOKEN;
+		set_state(net, STATE_FOUND_TOKEN);
 	}
 
 	/* give the packet a sequence number of needed */
@@ -464,6 +502,11 @@ mcast_send(struct net *net)
 			net->resendqlen--;
 		}
 	}
+
+	return;
+
+detach:
+	ioevent_detach(net->mcast_send_ev);
 }
 
 
@@ -475,7 +518,7 @@ mcast_send(struct net *net)
  * Request resends for missing packets
  */
 static void
-mcast_recv_resend(struct net *net)
+mcast_recv_resend(int UNUSED(dummy), struct net *net)
 {
 	uint64_t sequence;
 
@@ -485,6 +528,8 @@ mcast_recv_resend(struct net *net)
 		     sequence < LIST_FIRST(&net->recvq, packetq)->sequence;
 		     sequence++)
 			mcast_send_msg(net, MSG_RESEND, "q", sequence);
+	} else {
+		ioevent_detach(net->resend_ev);
 	}
 }
 
@@ -506,7 +551,6 @@ mcast_recv_queue(struct net *net, struct packet *packet)
 		LIST_INSERT_BEFORE(&net->recvq, pos, packet, packetq);
 	else
 		LIST_INSERT_LAST(&net->recvq, packet, packetq);
-	net->recvqlen++;
 }
 
 /*
@@ -555,7 +599,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		}
 
 		/* record the new owner */
-		net->state = STATE_FOUND_TOKEN;
+		set_state(net, STATE_FOUND_TOKEN);
 		net->owner = packet->from;
 		break;
 
@@ -572,8 +616,8 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		if (unpack(packet->buf, packet->len, "*b",
 		    sizeof(net->owner), &net->owner) < 0)
 			warning("mcast_recv_process: unpack");
-		net->state = memcmp(&net->owner, &net->self, sizeof(net->owner)) == 0?
-		    STATE_HAS_TOKEN : STATE_FOUND_TOKEN;
+		set_state(net, memcmp(&net->owner, &net->self, sizeof(net->owner)) == 0?
+		    STATE_HAS_TOKEN : STATE_FOUND_TOKEN);
 
 		break;
 
@@ -597,7 +641,6 @@ mcast_recv_dequeue(struct net *net)
 		/* take off the packet */
 		packet = LIST_FIRST(&net->recvq, packetq);
 		LIST_REMOVE_FIRST(&net->recvq, packetq);
-		net->recvqlen--;
 
 		/* log spurious packets with sequence from hosts not holding
 		 * the token */
@@ -618,15 +661,15 @@ mcast_recv_dequeue(struct net *net)
 	}
 
 	/* request resends */
-	if (net->recvqlen > 2)
-		mcast_recv_resend(net);
+	if (!LIST_EMPTY(&net->recvq))
+		ioevent_attach(net->resend_ev, net->ioloop);
 }
 
 /*
  * Receive a single packet
  */
 static void
-mcast_recv(struct net *net)
+mcast_recv(int UNUSED(dummy), struct net *net)
 {
 	unsigned int len;
 	struct iovec iov[2];
@@ -733,7 +776,12 @@ mcast_recv(struct net *net)
 		else if (packet->sequence <= net->sequence)
 			goto out;
 
+		/* queue this packet */
 		mcast_recv_queue(net, packet);
+
+		/* process receive queue */
+		mcast_recv_dequeue(net);
+
 	} else {
 		mcast_recv_process(net, packet);
 		goto out;
@@ -754,7 +802,7 @@ out:
  * Process a single packet from the filesystem
  */
 static void
-fs_recv(struct net *net)
+fs_recv(int UNUSED(dummy), struct net *net)
 {
 	size_t len;
 	struct packet *packet;
@@ -764,7 +812,7 @@ fs_recv(struct net *net)
 	if (read(net->fsfd, &len, sizeof(len)) != sizeof(len)) {
 		/* short read or read error, connection was closed; meaning
 		 * we ought to terminate as well */
-		net->exit = true;
+		ioloop_break(net->ioloop);
 		return;
 	}
 
@@ -834,7 +882,7 @@ net_send(int netfd, enum msg msg, const char *fmt, ...)
  ***************************************************************************/
 
 static void
-timeout(struct net *net)
+timeout(int UNUSED(dummy), struct net *net)
 {
 	switch (net->state) {
 	case STATE_ASKING_TOKEN:
@@ -867,75 +915,9 @@ timeout(struct net *net)
 		break;
 	}
 
-	/* request resends for missing packets */
-	mcast_recv_resend(net);
-}
-
-
-/***************************************************************************
- *** Run loop **************************************************************
- ***************************************************************************/
-
-static void
-process(struct net *net)
-{
-	fd_set rfds, wfds, *wfdp = NULL;
-	struct timeval to, *tv = NULL;
-	int nfds, n;
-
-	FD_ZERO(&rfds);
-	FD_SET(net->mcastfd, &rfds);
-	nfds = net->mcastfd + 1;
-
-	/* receive messages from the fuse worker? */
-	if (net->sendqlen < MAXSENDQ) {
-		FD_SET(net->fsfd, &rfds);
-		nfds = max(nfds, net->fsfd + 1);
-	}
-
-	/* do we have something to send? */
-	if (!LIST_EMPTY(&net->sendq) &&
-	    (!needs_token(LIST_FIRST(&net->sendq, packetq)) ||
-	     net->state >= STATE_FOUND_TOKEN)) {
-		FD_ZERO(&wfds);
-		FD_SET(net->mcastfd, &wfds);
-		wfdp = &wfds;
-	}
-
-	/* determine if we need a timeout */
-	if (net->state < STATE_WITHOUT_TIMEOUT ||
-	    !LIST_EMPTY(&net->recvq)) {
-		to.tv_sec = 2;
-		to.tv_usec = 0;
-		tv = &to;
-	}
-
-	/* wait for an event */
-	n = select(nfds, &rfds, wfdp, NULL, tv);
-	if (n < 0) {
-		warning("select");
-		return;
-	}
-
-	/* handle timeouts */
-	if (n == 0) {
-		timeout(net);
-	} else {
-		/* handle incoming traffic */
-		if (FD_ISSET(net->fsfd, &rfds))
-			fs_recv(net);
-		if (FD_ISSET(net->mcastfd, &rfds))
-			mcast_recv(net);
-
-		/* process receive queue */
-		mcast_recv_dequeue(net);
-
-		/* handle outgoing traffic */
-		if (wfdp != NULL &&
-		    FD_ISSET(net->mcastfd, &wfds))
-			mcast_send(net);
-	}
-
+	/* can we do without at timeout? */
+	if (net->state >= STATE_WITHOUT_TIMEOUT)
+		ioevent_detach(net->state_ev);
 }
 
 
@@ -952,6 +934,7 @@ net_init(struct multifs *multifs)
 	int fd[2];
 	struct net net;
 	socklen_t socklen;
+	struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
 
 	/* create the server socket */
 	memset(&net, '\0', sizeof(net));
@@ -978,6 +961,40 @@ net_init(struct multifs *multifs)
 	 * networking worker */
 	if (pipe(fd) < 0)
 		fatal(1, "pipe");
+
+	/* create the I/O loop */
+	net.ioloop = ioloop_alloc(IOEVENT_READ | IOEVENT_WRITE | IOEVENT_TIMER);
+	if (net.ioloop == NULL)
+		fatal(1, "ioloop_alloc");
+
+	/* create I/O events */
+	net.fs_recv_ev = ioevent_read(fd[0], (ioevent_cb_t *) fs_recv, &net, 0);
+	if (net.fs_recv_ev == NULL)
+		fatal(1, "ioevent_read");
+
+	net.mcast_recv_ev = ioevent_read(net.mcastfd, (ioevent_cb_t *) mcast_recv, &net, 0);
+	if (net.mcast_recv_ev == NULL)
+		fatal(1, "ioevent_read");
+
+	net.mcast_send_ev = ioevent_write(net.mcastfd, (ioevent_cb_t *) mcast_send, &net, 0);
+	if (net.mcast_send_ev == NULL)
+		fatal(1, "ioevent_read");
+
+	net.state_ev = ioevent_timer(&tv, (ioevent_cb_t *) timeout, &net, 0);
+	if (net.state_ev == NULL)
+		fatal(1, "ioevent_timer");
+
+	net.resend_ev = ioevent_timer(&tv, (ioevent_cb_t *) mcast_recv_resend, &net, 0);
+	if (net.resend_ev == NULL)
+		fatal(1, "ioevent_timer");
+
+	/* attach all */
+	if (ioevent_attach(net.fs_recv_ev, net.ioloop) < 0 ||
+	    ioevent_attach(net.mcast_recv_ev, net.ioloop) < 0 ||
+	    ioevent_attach(net.mcast_send_ev, net.ioloop) < 0 ||
+	    ioevent_attach(net.state_ev, net.ioloop) < 0 ||
+	    ioevent_attach(net.resend_ev, net.ioloop) < 0)
+		fatal(1, "ioevent_attach");
 
 	switch (multifs->netpid = fork()) {
 	case -1:
@@ -1013,8 +1030,7 @@ net_init(struct multifs *multifs)
 	mcast_send_msg(&net, MSG_TOKEN_WHERE, "");
 
 	/* process socket events */
-	while (!net.exit)
-		process(&net);
+	ioloop_run(net.ioloop);
 
 	exit(0);
 }

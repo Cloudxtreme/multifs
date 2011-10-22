@@ -1,0 +1,3 @@
+[submodule "libio"]
+	path = libio
+	url = git://github.com/irdc/libio.git
