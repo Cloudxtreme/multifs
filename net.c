@@ -570,7 +570,8 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		break;
 
 	case MSG_TOKEN_HERE:
-		if (!ioendpoint_equals(net->owner, packet->from)) {
+		if (net->owner != NULL &&
+		    !ioendpoint_equals(net->owner, packet->from)) {
 			/* log spurious owner changes */
 			if (net->state == STATE_FOUND_TOKEN)
 				warningx("mcast_recv_process: spurious token owner change: %s -> %s",
@@ -603,12 +604,13 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		if (endp != NULL) {
 			ioendpoint_release(net->owner);
 			net->owner = endp;
+
+			set_state(net, ioendpoint_equals(net->owner, net->self)?
+			    STATE_HAS_TOKEN : STATE_FOUND_TOKEN);
 		} else {
 			warning("ioendpoint_alloc_socket");
 		}
 
-		set_state(net, ioendpoint_equals(net->owner, net->self)?
-		    STATE_HAS_TOKEN : STATE_FOUND_TOKEN);
 		break;
 	}
 
@@ -635,7 +637,8 @@ mcast_recv_dequeue(struct net *net)
 
 		/* log spurious packets with sequence from hosts not holding
 		 * the token */
-		if (!ioendpoint_equals(net->owner, packet->from)) {
+		if (net->owner != NULL &&
+		    !ioendpoint_equals(net->owner, packet->from)) {
 			warningx("mcast_recv_process: packet with sequence not "
 			    "from token owner");
 			packet_free(packet);
