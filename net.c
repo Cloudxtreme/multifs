@@ -28,7 +28,6 @@
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
-#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -42,9 +41,9 @@
 
 #include <io/loop.h>
 #include <io/event.h>
-
-/* length of an IPv6 address encoded as a string, plus terminating NUL character */
-#define MAX6ADDR	40
+#include <io/endpoint.h>
+#include <io/queue.h>
+#include <io/socket.h>
 
 /* size of the packet header */
 #define HEADERSZ	(1 + 1 + sizeof(uint16_t) + sizeof(uint64_t))
@@ -69,7 +68,7 @@ enum state {
 /* packet */
 struct packet {
 	LIST_ENTRY(, packet)	 packetq;	/* in-order linked list of messages */
-	struct in6_addr		 from;		/* sender */
+	struct ioendpoint	*from;		/* sender */
 	enum msg		 msg;		/* packet message */
 	uint64_t		 sequence;	/* sequence number */
 	size_t			 len;		/* packet length */
@@ -79,7 +78,7 @@ struct packet {
 /* networking state */
 struct net {
 	struct multifs		*multifs;
-	int			 mcastfd;
+	struct ioqueue		*mcast;
 	int			 fsfd;
 	struct ioloop		*ioloop;
 	struct ioevent		*fs_recv_ev,
@@ -89,10 +88,9 @@ struct net {
 				*resend_ev;
 	enum state		 state;
 	uint64_t		 sequence;
-	struct sockaddr_in6	 multicast;
-	struct in6_addr		 self,
-				 owner;
-	char			 ipbuf[64];
+	struct ioendpoint	*multicast,
+				*owner,
+				*self;
 	LIST_HEAD(, packet)	 sendq,		/* packets still to be sent,
 						 * waiting for us to gain
 						 * the token */
@@ -106,10 +104,6 @@ struct net {
 	unsigned int		 sendqlen;	/* length of the sendq */
 	unsigned int		 resendqlen;	/* length of the resendq */
 };
-
-/* empty owner */
-static const struct in6_addr
-in6_addr_any = IN6ADDR_ANY_INIT;
 
 /*
  * Reliably perform I/O on a file descriptor, dealing with short
@@ -162,59 +156,51 @@ reliable_io(int fd, const struct iovec *iov, int iovcnt,
 /*
  * Create the server socket and bind it to the specified local port
  */
-static int
+static struct ioqueue *
 make_socket(int port)
 {
-	int mcastfd, opt;
+	static const struct ioparam_init
+	init[] = {
+		{ &ioqueue_socket_v6only,	true },
+		{ &ioqueue_mcast_loop,		false },
+		{ &ioqueue_socket_mcast_hops,	255 },
+		{ &ioqueue_socket_reuselocal,	true }
+	};
+
 	struct sockaddr_in6 sin6;
+	struct ioendpoint *endp;
+	struct ioqueue *queue;
 
-	/* create the socket */
-	mcastfd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (mcastfd < 0)
-		fatal(1, "socket");
-
-	/* set options */
-	opt = 1;
-#if defined(SO_REUSEPORT)
-	if (setsockopt(mcastfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
-		fatal(1, "setsockopt(SOL_SOCKET, SO_REUSEPORT)");
-#elif defined(HAVE_REUSEADDR_LIKE_REUSEPORT)
-	if (setsockopt(mcastfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-		fatal(1, "setsockopt(SOL_SOCKET, SO_REUSEADDR)");
-#endif
-
-	opt = 1;
-	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) < 0)
-		fatal(1, "setsockopt(IPPROTO_IPV6, IPV6_V6ONLY)");
-
-	opt = 0;
-	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &opt, sizeof(opt)) < 0)
-		fatal(1, "setsockopt(IPPROTO_IPV6, IPV6_MULTICAST_HOPS)");
-	opt = 255;
-	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &opt, sizeof(opt)) < 0)
-		fatal(1, "setsockopt(IPPROTO_IPV6, IPV6_MULTICAST_HOPS)");
-
-	/* bind to the local port */
+	/* create the the local endpoint */
 	memset(&sin6, '\0', sizeof(sin6));
 	sin6.sin6_family = AF_INET6;
 #ifdef HAVE_SA_LEN
 	sin6.sin6_len = sizeof(sin6);
 #endif /* HAVE_SA_LEN */
 	sin6.sin6_port = htons(port);
-	if (bind(mcastfd, (const struct sockaddr *) &sin6, sizeof(sin6)) < 0)
-		fatal(1, "bind");
+	endp = ioendpoint_alloc_socket((struct sockaddr *) &sin6);
+	if (endp == NULL)
+		fatal(1, "ioendpoint_alloc_socket");
 
-	return mcastfd;
+	/* create the socket */
+	queue = ioqueue_alloc_socket(AF_INET6, NULL, endp, init, nitems(init));
+	if (queue == NULL)
+		fatal(1, "ioqueue_alloc_socket(AF_INET6)");
+
+	ioendpoint_release(endp);
+
+	return queue;
 }
 
 /*
  * Create the multicast address for the specified name and port
  */
-static void
-make_addr(const char *restrict name, size_t namelen, int port,
-          struct sockaddr_in6 *sin6)
+static struct ioendpoint *
+make_addr(const char *restrict name, size_t namelen, int port)
 {
 	hashval_t h;
+	struct sockaddr_in6 sin6;
+	struct ioendpoint *endp;
 
 	/* hash the name */
 	h = hash((const uint8_t *) name, namelen, port);
@@ -222,39 +208,32 @@ make_addr(const char *restrict name, size_t namelen, int port,
 	h.high = hton64(h.high);
 
 	/* determine the address */
-	memset(sin6, '\0', sizeof(*sin6));
-	sin6->sin6_family = AF_INET6;
+	memset(&sin6, '\0', sizeof(sin6));
+	sin6.sin6_family = AF_INET6;
 #ifdef HAVE_SA_LEN
-	sin6->sin6_len = sizeof(*sin6);
+	sin6.sin6_len = sizeof(sin6);
 #endif /* HAVE_SA_LEN */
-	sin6->sin6_port = htons(NET_PORT);
-	memcpy(&sin6->sin6_addr, &h, sizeof(sin6->sin6_addr));
-	sin6->sin6_addr.s6_addr[0] = 0xff;
-	sin6->sin6_addr.s6_addr[1] = 0x15;
-}
+	sin6.sin6_port = htons(NET_PORT);
+	memcpy(&sin6.sin6_addr, &h, sizeof(sin6.sin6_addr));
+	sin6.sin6_addr.s6_addr[0] = 0xff;
+	sin6.sin6_addr.s6_addr[1] = 0x15;
 
-/*
- * Make the server socket a multicast socket
- */
-static void
-make_multicast(int mcastfd, const struct sockaddr_in6 *addr)
-{
-	struct ipv6_mreq mreq;
+	/* allocate the endpoint */
+	endp = ioendpoint_alloc_socket((struct sockaddr *) &sin6);
+	if (endp == NULL)
+		fatal(1, "ioendpoint_alloc_socket");
 
-	/* join the multicast group */
-	mreq.ipv6mr_multiaddr = addr->sin6_addr;
-	mreq.ipv6mr_interface = 0;
-	if (setsockopt(mcastfd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) < 0)
-		fatal(1, "setsockopt(IPV6_JOIN_GROUP)");
+	return endp;
 }
 
 /*
  * Get own address.
  */
-static void
-getmyaddr(struct in6_addr *self)
+static struct ioendpoint *
+getmyaddr()
 {
 	struct ifaddrs *ifap, *i;
+	struct ioendpoint *endp = NULL;
 
 	if (getifaddrs(&ifap) < 0)
 		fatal(1, "getifaddrs");
@@ -272,11 +251,16 @@ getmyaddr(struct in6_addr *self)
 			continue;
 
 		/* get the address */
-		*self = ((struct sockaddr_in6 *) i->ifa_addr)->sin6_addr;
+		endp = ioendpoint_alloc_socket(i->ifa_addr);
+		if (endp == NULL)
+			fatal(1, "ioendpoint_alloc_socket");
+
 		break;
 	}
 
 	freeifaddrs(ifap);
+
+	return endp;
 }
 
 /*
@@ -296,25 +280,6 @@ syslog_err(const char *str, size_t len, enum error error)
 	openlog(getprogname(), LOG_PID, LOG_DAEMON);
 	syslog(priority, "%*s\n", (int) len, str);
 	closelog();
-}
-
-/*
- * Format an address as a string
- */
-static const char *
-net_addr(struct net *net, const struct sockaddr_in6 *sin6)
-{
-	size_t len;
-
-	/* format the address */
-	net->ipbuf[0] = '[';
-	inet_ntop(AF_INET6, &sin6->sin6_addr, net->ipbuf + 1, sizeof(net->ipbuf) - 1);
-	len = strlen(net->ipbuf);
-
-	/* append the port */
-	snprintf(net->ipbuf + len, sizeof(net->ipbuf) - len, "]:%d", ntohs(sin6->sin6_port));
-
-	return net->ipbuf;
 }
 
 /*
@@ -339,6 +304,17 @@ set_state(struct net *net, enum state state)
 		ioevent_attach(net->state_ev, net->ioloop);
 
 	net->state = state;
+}
+
+/*
+ * Free a packet
+ */
+static void
+packet_free(struct packet *packet)
+{
+	if (packet != NULL)
+		ioendpoint_release(packet->from);
+	free(packet);
 }
 
 
@@ -411,27 +387,20 @@ static void
 mcast_send_process(struct net *net, struct packet *packet)
 {
 	char header[HEADERSZ];
-	struct iovec iov[2];
-	struct msghdr msghdr;
+	struct iobuf buf[2];
 
 	assert(pack(NULL, 0, "bbwq", NET_VERSION, 0, 0, (uint64_t) 0) == HEADERSZ);
 
 	/* create the header */
-	iov[0].iov_base = header;
-	iov[0].iov_len = pack(header, sizeof(header), "bbwq",
+	buf[0].base = header;
+	buf[0].len = pack(header, sizeof(header), "bbwq",
 	    NET_VERSION, packet->msg, (int) packet->len, packet->sequence);
-	iov[1].iov_base = packet->buf;
-	iov[1].iov_len = packet->len;
-
-	memset(&msghdr, '\0', sizeof(msghdr));
-	msghdr.msg_name = &net->multicast;
-	msghdr.msg_namelen = sizeof(net->multicast);
-	msghdr.msg_iov = iov;
-	msghdr.msg_iovlen = nitems(iov);
+	buf[1].base = packet->buf;
+	buf[1].len = packet->len;
 
 	/* send the packet */
-	if (sendmsg(net->mcastfd, &msghdr, 0) < 0)
-		warning("mcast_send_process: sendmsg");
+	if (ioqueue_sendtov(net->mcast, buf, nitems(buf), net->multicast) < 0)
+		warning("mcast_send_process: ioqueue_sendtov");
 }
 
 /*
@@ -473,9 +442,22 @@ mcast_send(int UNUSED(dummy), struct net *net)
 
 	/* is the next packet a token grant? */
 	if (packet->msg == MSG_TOKEN_GIVE) {
+		struct sockaddr_in6 sin6;
+		struct ioendpoint *endp;
+
 		/* record the new owner */
+		sin6.sin6_family = AF_INET6;
 		unpack(packet->buf, packet->len, "*b",
-		    sizeof(net->owner), &net->owner);
+		    sizeof(sin6.sin6_addr), &sin6.sin6_addr);
+		sin6.sin6_port = htons(NET_PORT);
+		endp = ioendpoint_alloc_socket((struct sockaddr *) &sin6);
+		if (endp != NULL) {
+			ioendpoint_release(net->owner);
+			net->owner = endp;
+		} else {
+			warning("ioendpoint_alloc_socket");
+		}
+
 		set_state(net, STATE_FOUND_TOKEN);
 	}
 
@@ -498,7 +480,7 @@ mcast_send(int UNUSED(dummy), struct net *net)
 		while (net->resendqlen > MAXSENDQ) {
 			packet = LIST_FIRST(&net->resendq, packetq);
 			LIST_REMOVE_FIRST(&net->resendq, packetq);
-			free(packet);
+			packet_free(packet);
 			net->resendqlen--;
 		}
 	}
@@ -559,8 +541,6 @@ mcast_recv_queue(struct net *net, struct packet *packet)
 static void
 mcast_recv_process(struct net *net, struct packet *packet)
 {
-	char buf1[MAX6ADDR], buf2[MAX6ADDR];
-
 	/* process the packet */
 	switch (packet->msg) {
 	case MSG_RESEND: {
@@ -590,17 +570,16 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		break;
 
 	case MSG_TOKEN_HERE:
-		if (memcmp(&net->owner, &packet->from, sizeof(net->owner)) != 0) {
+		if (!ioendpoint_equals(net->owner, packet->from)) {
 			/* log spurious owner changes */
 			if (net->state == STATE_FOUND_TOKEN)
 				warningx("mcast_recv_process: spurious token owner change: %s -> %s",
-				    inet_ntop(AF_INET6, &net->owner, buf1, sizeof(buf1)),
-				    inet_ntop(AF_INET6, &packet->from, buf2, sizeof(buf2)));
+				    ioendpoint_format(net->owner), ioendpoint_format(packet->from));
 		}
 
 		/* record the new owner */
 		set_state(net, STATE_FOUND_TOKEN);
-		net->owner = packet->from;
+		net->owner = ioendpoint_retain(packet->from);
 		break;
 
 	case MSG_TOKEN_ASK:	/* somebody's requesting the token */
@@ -611,15 +590,27 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		}
 		break;
 
-	case MSG_TOKEN_GIVE:	/* token was granted to another owner */
-		/* get the new owner */
-		if (unpack(packet->buf, packet->len, "*b",
-		    sizeof(net->owner), &net->owner) < 0)
-			warning("mcast_recv_process: unpack");
-		set_state(net, memcmp(&net->owner, &net->self, sizeof(net->owner)) == 0?
-		    STATE_HAS_TOKEN : STATE_FOUND_TOKEN);
+	case MSG_TOKEN_GIVE: {	/* token was granted to another owner */
+		struct sockaddr_in6 sin6;
+		struct ioendpoint *endp;
 
+		/* record the new owner */
+		sin6.sin6_family = AF_INET6;
+		unpack(packet->buf, packet->len, "*b",
+		    sizeof(sin6.sin6_addr), &sin6.sin6_addr);
+		sin6.sin6_port = htons(NET_PORT);
+		endp = ioendpoint_alloc_socket((struct sockaddr *) &sin6);
+		if (endp != NULL) {
+			ioendpoint_release(net->owner);
+			net->owner = endp;
+		} else {
+			warning("ioendpoint_alloc_socket");
+		}
+
+		set_state(net, ioendpoint_equals(net->owner, net->self)?
+		    STATE_HAS_TOKEN : STATE_FOUND_TOKEN);
 		break;
+	}
 
 	default:
 		if (multifs_process(net->multifs, packet->msg, packet->buf, packet->len) == 0)
@@ -644,11 +635,10 @@ mcast_recv_dequeue(struct net *net)
 
 		/* log spurious packets with sequence from hosts not holding
 		 * the token */
-		if (memcmp(&net->owner, &packet->from,
-		    sizeof(net->owner)) != 0) {
+		if (!ioendpoint_equals(net->owner, packet->from)) {
 			warningx("mcast_recv_process: packet with sequence not "
 			    "from token owner");
-			free(packet);
+			packet_free(packet);
 			continue;
 		}
 
@@ -657,7 +647,7 @@ mcast_recv_dequeue(struct net *net)
 
 		/* process the packet */
 		mcast_recv_process(net, packet);
-		free(packet);
+		packet_free(packet);
 	}
 
 	/* request resends */
@@ -671,42 +661,33 @@ mcast_recv_dequeue(struct net *net)
 static void
 mcast_recv(int UNUSED(dummy), struct net *net)
 {
-	unsigned int len;
-	struct iovec iov[2];
-	struct msghdr msghdr;
+	ssize_t len;
+	struct iobuf buf[2];
 	char header[HEADERSZ];
 	struct packet *packet;
-	struct sockaddr_in6 from;
+	struct ioendpoint *from;
 	uint8_t version;
 	uint16_t plen;
 
 	/* get packet length */
-	len = 0;
-	if (ioctl(net->mcastfd, FIONREAD, &len) < 0) {
-		warning("mcast_recv: ioctl(FIONREAD)");
+	len = ioqueue_nextsize(net->mcast);
+	if (len < 0) {
+		warning("mcast_recv: ioqueue_nextsize");
 		return;
 	}
 
 	/* handle packets that are too small */
-	if (len < sizeof(header)) {
-		/* set up structures */
-		iov[0].iov_base = header;
-		iov[0].iov_len = sizeof(header);
-
-		memset(&msghdr, '\0', sizeof(msghdr));
-		msghdr.msg_name = &from;
-		msghdr.msg_namelen = sizeof(from);
-		msghdr.msg_iov = iov;
-		msghdr.msg_iovlen = 1;
-
+	if (len < (ssize_t) sizeof(header)) {
 		/* receive */
-		if (recvmsg(net->mcastfd, &msghdr, 0) < 0) {
-			warning("mcast_recv: recvmsg");
+		if (ioqueue_recvfrom(net->mcast, header,
+		    sizeof(header), &from) < 0) {
+			warning("mcast_recv: ioqueue_recvfrom");
 			goto out;
 		}
 
 		warningx("mcast_recv: packet too small (%d) from %s",
-		    len, net_addr(net, &from));
+		    len, ioendpoint_format(from));
+		ioendpoint_release(from);
 
 		return;
 	}
@@ -720,29 +701,23 @@ mcast_recv(int UNUSED(dummy), struct net *net)
 		    offsetof(struct packet, buf) + len);
 		return;
 	}
+	memset(packet, '\0', offsetof(struct packet, buf));
 
 	/* set up structures */
-	iov[0].iov_base = header;
-	iov[0].iov_len = sizeof(header);
-	iov[1].iov_base = packet->buf;
-	iov[1].iov_len = len;
-
-	memset(&msghdr, '\0', sizeof(msghdr));
-	msghdr.msg_name = &from;
-	msghdr.msg_namelen = sizeof(from);
-	msghdr.msg_iov = iov;
-	msghdr.msg_iovlen = nitems(iov);
+	buf[0].base = header;
+	buf[0].len = sizeof(header);
+	buf[1].base = packet->buf;
+	buf[1].len = len;
 
 	/* receive */
-	if (recvmsg(net->mcastfd, &msghdr, 0) < 0) {
-		warning("mcast_recv: recvmsg");
+	if (ioqueue_recvfromv(net->mcast, buf, nitems(buf), &from) < 0) {
+		warning("mcast_recv: ioqueue_recvfrom");
 		goto out;
 	}
 
 	/* initialise the packet and parse the header */
-	memset(packet, '\0', offsetof(struct packet, buf));
 	packet->len = len;
-	packet->from = from.sin6_addr;
+	packet->from = from;
 	if (unpack(header, sizeof(header), "bbwq",
 	    &version, &packet->msg, &plen, &packet->sequence) < 0) {
 		warning("mcast_recv: unpack");
@@ -752,7 +727,7 @@ mcast_recv(int UNUSED(dummy), struct net *net)
 	/* check version */
 	if (version != NET_VERSION) {
 		warningx("mcast_recv: bad version %d from %s", version,
-		    net_addr(net, &from));
+		    ioendpoint_format(from));
 		goto out;
 	}
 
@@ -790,7 +765,7 @@ mcast_recv(int UNUSED(dummy), struct net *net)
 	return;
 
 out:
-	free(packet);
+	packet_free(packet);
 }
 
 
@@ -837,7 +812,7 @@ fs_recv(int UNUSED(dummy), struct net *net)
 	/* receive the packet */
 	if (reliable_io(net->fsfd, iov, nitems(iov), readv) < 0) {
 		warning("fs_recv: readv");
-		free(packet);
+		packet_free(packet);
 		return;
 	}
 
@@ -907,7 +882,7 @@ timeout(int UNUSED(dummy), struct net *net)
 		 * that we have the token (ie. steal it) */
 		mcast_send_msg(net, MSG_TOKEN_HERE, "");
 		net->state = STATE_HAS_TOKEN;
-		net->owner = net->self;
+		net->owner = ioendpoint_retain(net->self);
 		break;
 
 	default:
@@ -933,29 +908,27 @@ net_init(struct multifs *multifs)
 {
 	int fd[2];
 	struct net net;
-	socklen_t socklen;
 	struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
 
 	/* create the server socket */
 	memset(&net, '\0', sizeof(net));
 	net.multifs = multifs;
-	net.mcastfd = make_socket(NET_PORT);
+	net.mcast = make_socket(NET_PORT);
 	net.sequence = UNKNOWN_SEQUENCE;
-	getmyaddr(&net.self);
+	net.self = getmyaddr();
 
 	/* set it to multicast */
-	make_addr(multifs->fsname, multifs->fsnamelen, NET_PORT, &net.multicast);
-	make_multicast(net.mcastfd, &net.multicast);
+	net.multicast = make_addr(multifs->fsname, multifs->fsnamelen, NET_PORT);
+	if (ioqueue_mcast_join(net.mcast, net.multicast) < 0)
+		fatal(1, "ioqueue_mcast_join");
 
 	/* determine maximum message length */
-	socklen = sizeof(multifs->maxmsglen);
-	if (getsockopt(net.mcastfd, SOL_SOCKET, SO_SNDBUF,
-	    &multifs->maxmsglen, &socklen) < 0)
-		fatal(1, "getsockopt(SOL_SOCKET, SO_SNDBUF)");
+	multifs->maxmsglen = ioqueue_maxsize(net.mcast);
+	if (multifs->maxmsglen < 0)
+		fatal(1, "ioqueue_maxsize");
 	multifs->maxmsglen -= HEADERSZ;
 
-	trace("using multicast group %s",
-	    net_addr(&net, &net.multicast));
+	trace("using multicast group %s", ioendpoint_format(net.multicast));
 
 	/* create the sockets the fuse worker uses to communicate with the
 	 * networking worker */
@@ -972,13 +945,13 @@ net_init(struct multifs *multifs)
 	if (net.fs_recv_ev == NULL)
 		fatal(1, "ioevent_read");
 
-	net.mcast_recv_ev = ioevent_read(net.mcastfd, (ioevent_cb_t *) mcast_recv, &net, 0);
+	net.mcast_recv_ev = ioqueue_recv_event(net.mcast, (ioevent_cb_t *) mcast_recv, &net, 0);
 	if (net.mcast_recv_ev == NULL)
-		fatal(1, "ioevent_read");
+		fatal(1, "ioqueue_recv_event");
 
-	net.mcast_send_ev = ioevent_write(net.mcastfd, (ioevent_cb_t *) mcast_send, &net, 0);
+	net.mcast_send_ev = ioqueue_send_event(net.mcast, (ioevent_cb_t *) mcast_send, &net, 0);
 	if (net.mcast_send_ev == NULL)
-		fatal(1, "ioevent_read");
+		fatal(1, "ioqueue_send_event");
 
 	net.state_ev = ioevent_timer(&tv, (ioevent_cb_t *) timeout, &net, 0);
 	if (net.state_ev == NULL)
@@ -1009,7 +982,7 @@ net_init(struct multifs *multifs)
 	default:
 		/* in parent, close descriptors we no longer need here */
 		close(fd[0]);
-		close(net.mcastfd);
+		ioqueue_free(net.mcast);
 		multifs->netfd = fd[1];
 		return;
 	}
