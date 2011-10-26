@@ -436,7 +436,7 @@ mcast_send(int UNUSED(dummy), struct net *net)
 
 			/* this changes the packet to be sent */
 			packet = LIST_FIRST(&net->sendq, packetq);
-		} else {
+		} else if (net->state != STATE_HAS_TOKEN) {
 			goto detach;
 		}
 	}
