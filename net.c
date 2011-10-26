@@ -179,9 +179,9 @@ make_socket(int port)
 	sin6.sin6_len = sizeof(sin6);
 #endif /* HAVE_SA_LEN */
 	sin6.sin6_port = htons(port);
-	endp = ioendpoint_alloc_socket((struct sockaddr *) &sin6);
+	endp = ioendpoint_alloc_sockaddr((struct sockaddr *) &sin6);
 	if (endp == NULL)
-		fatal(1, "ioendpoint_alloc_socket");
+		fatal(1, "ioendpoint_alloc_sockaddr");
 
 	/* create the socket */
 	queue = ioqueue_alloc_socket(AF_INET6, NULL, endp, init, nitems(init));
@@ -230,9 +230,9 @@ make_addr(const char *restrict name, size_t namelen, int port)
 	sin6.sin6_addr.s6_addr[1] = 0x15;
 
 	/* allocate the endpoint */
-	endp = ioendpoint_alloc_socket((struct sockaddr *) &sin6);
+	endp = ioendpoint_alloc_sockaddr((struct sockaddr *) &sin6);
 	if (endp == NULL)
-		fatal(1, "ioendpoint_alloc_socket");
+		fatal(1, "ioendpoint_alloc_sockaddr");
 
 	return endp;
 }
@@ -262,9 +262,9 @@ getmyaddr()
 			continue;
 
 		/* get the address */
-		endp = ioendpoint_alloc_socket(i->ifa_addr);
+		endp = ioendpoint_alloc_sockaddr(i->ifa_addr);
 		if (endp == NULL)
-			fatal(1, "ioendpoint_alloc_socket");
+			fatal(1, "ioendpoint_alloc_sockaddr");
 
 		break;
 	}
@@ -461,12 +461,12 @@ mcast_send(int UNUSED(dummy), struct net *net)
 		unpack(packet->buf, packet->len, "*b",
 		    sizeof(sin6.sin6_addr), &sin6.sin6_addr);
 		sin6.sin6_port = htons(NET_PORT);
-		endp = ioendpoint_alloc_socket((struct sockaddr *) &sin6);
+		endp = ioendpoint_alloc_sockaddr((struct sockaddr *) &sin6);
 		if (endp != NULL) {
 			ioendpoint_release(net->owner);
 			net->owner = endp;
 		} else {
-			warning("ioendpoint_alloc_socket");
+			warning("ioendpoint_alloc_sockaddr");
 		}
 
 		set_state(net, STATE_FOUND_TOKEN);
@@ -620,7 +620,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		unpack(packet->buf, packet->len, "*b",
 		    sizeof(sin6.sin6_addr), &sin6.sin6_addr);
 		sin6.sin6_port = htons(NET_PORT);
-		endp = ioendpoint_alloc_socket((struct sockaddr *) &sin6);
+		endp = ioendpoint_alloc_sockaddr((struct sockaddr *) &sin6);
 		if (endp != NULL) {
 			ioendpoint_release(net->owner);
 			net->owner = endp;
@@ -628,7 +628,7 @@ mcast_recv_process(struct net *net, struct packet *packet)
 			set_state(net, ioendpoint_equals(net->owner, net->self)?
 			    STATE_HAS_TOKEN : STATE_FOUND_TOKEN);
 		} else {
-			warning("ioendpoint_alloc_socket");
+			warning("ioendpoint_alloc_sockaddr");
 		}
 
 		break;
