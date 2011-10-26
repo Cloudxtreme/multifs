@@ -633,6 +633,11 @@ mcast_recv_process(struct net *net, struct packet *packet)
 
 			set_state(net, ioendpoint_equals(net->owner, net->self)?
 			    STATE_HAS_TOKEN : STATE_FOUND_TOKEN);
+
+			/* start sending */
+			if (net->state == STATE_HAS_TOKEN &&
+			    !LIST_EMPTY(&net->sendq))
+				ioevent_attach(net->mcast_send_ev, net->ioloop);
 		} else {
 			warning("ioendpoint_alloc_sockaddr");
 		}
