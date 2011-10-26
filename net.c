@@ -342,8 +342,7 @@ static void
 mcast_send_queue(struct net *net, struct packet *packet)
 {
 	/* we have something to send */
-	if (LIST_EMPTY(&net->sendq))
-		ioevent_attach(net->mcast_send_ev, net->ioloop);
+	ioevent_attach(net->mcast_send_ev, net->ioloop);
 
 	if (!needs_token(packet))
 		LIST_INSERT_FIRST(&net->sendq, packet, packetq);		
@@ -546,6 +545,9 @@ mcast_recv_queue(struct net *net, struct packet *packet)
 		LIST_INSERT_BEFORE(&net->recvq, pos, packet, packetq);
 	else
 		LIST_INSERT_LAST(&net->recvq, packet, packetq);
+
+	/* request resends */
+	ioevent_attach(net->resend_ev, net->ioloop);
 }
 
 /*
@@ -683,10 +685,6 @@ mcast_recv_dequeue(struct net *net)
 		mcast_recv_process(net, packet);
 		packet_free(packet);
 	}
-
-	/* request resends */
-	if (!LIST_EMPTY(&net->recvq))
-		ioevent_attach(net->resend_ev, net->ioloop);
 }
 
 /*
@@ -789,7 +787,6 @@ mcast_recv(int UNUSED(dummy), struct net *net)
 
 		/* process receive queue */
 		mcast_recv_dequeue(net);
-
 	} else {
 		mcast_recv_process(net, packet);
 		goto out;
