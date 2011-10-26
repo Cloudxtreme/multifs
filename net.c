@@ -606,8 +606,12 @@ mcast_recv_process(struct net *net, struct packet *packet)
 	case MSG_TOKEN_ASK:	/* somebody's requesting the token */
 		/* if we have the token, grant it */
 		if (net->state == STATE_HAS_TOKEN) {
+			struct sockaddr_storage addr;
+
+			ioendpoint_sockaddr(packet->from, &addr);
 			mcast_send_msg(net, MSG_TOKEN_GIVE, "*b",
-			    sizeof(packet->from), &packet->from);
+			    sizeof(struct in6_addr),
+			    &((struct sockaddr_in6 *) &addr)->sin6_addr);
 		}
 		break;
 
