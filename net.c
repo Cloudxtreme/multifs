@@ -84,8 +84,9 @@ struct net {
 	struct ioevent		*fs_recv_ev,
 				*mcast_recv_ev,
 				*mcast_send_ev,
-				*state_ev,
-				*resend_ev;
+				*timeout_ev,
+				*resend_ev,
+				*speedup_ev;
 	enum state		 state;
 	uint64_t		 sequence;
 	struct ioendpoint	*multicast,
@@ -188,6 +189,16 @@ make_socket(int port)
 		fatal(1, "ioqueue_alloc_socket(AF_INET6)");
 
 	ioendpoint_release(endp);
+
+	/* create rate-monitoring queue */
+	queue = ioqueue_alloc_rate(queue);
+	if (queue == NULL)
+		fatal(1, "ioqueue_alloc_rate");
+
+	/* create rate-limiting queue */
+	queue = ioqueue_alloc_limit(queue);
+	if (queue == NULL)
+		fatal(1, "ioqueue_alloc_limit");
 
 	return queue;
 }
@@ -301,7 +312,7 @@ set_state(struct net *net, enum state state)
 	/* does this state require timeout processing? */
 	if (net->state >= STATE_WITHOUT_TIMEOUT &&
 	    state < STATE_WITHOUT_TIMEOUT)
-		ioevent_attach(net->state_ev, net->ioloop);
+		ioevent_attach(net->timeout_ev, net->ioloop);
 
 	net->state = state;
 }
@@ -399,8 +410,8 @@ mcast_send_process(struct net *net, struct packet *packet)
 	buf[1].len = packet->len;
 
 	/* send the packet */
-	if (ioqueue_sendtov(net->mcast, buf, nitems(buf), net->multicast) < 0)
-		warning("mcast_send_process: ioqueue_sendtov");
+	if (ioqueue_sendv(net->mcast, nitems(buf), buf, net->multicast) < 0)
+		warning("mcast_send_process: ioqueue_sendv");
 }
 
 /*
@@ -554,9 +565,18 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		/* check if we have the packet */
 		LIST_FOREACH(sent, &net->resendq, packetq) {
 			if (sent->sequence == sequence) {
+				uintptr_t rate;
+
+				/* resend this packet */
 				LIST_REMOVE(&net->resendq, sent, packetq);
 				net->resendqlen--;
 				mcast_send_queue(net, sent);
+
+				/* reduce the transmission rate so as to
+				 * keep up with slow peers */
+				ioqueue_get(net->mcast, &ioqueue_rate_send, &rate);
+				ioqueue_set(net->mcast, &ioqueue_limit_send, rate / 2);
+
 				break;
 			}
 		}
@@ -682,8 +702,7 @@ mcast_recv(int UNUSED(dummy), struct net *net)
 	/* handle packets that are too small */
 	if (len < (ssize_t) sizeof(header)) {
 		/* receive */
-		if (ioqueue_recvfrom(net->mcast, header,
-		    sizeof(header), &from) < 0) {
+		if (ioqueue_recv(net->mcast, header, sizeof(header), &from) < 0) {
 			warning("mcast_recv: ioqueue_recvfrom");
 			goto out;
 		}
@@ -713,8 +732,8 @@ mcast_recv(int UNUSED(dummy), struct net *net)
 	buf[1].len = len;
 
 	/* receive */
-	if (ioqueue_recvfromv(net->mcast, buf, nitems(buf), &from) < 0) {
-		warning("mcast_recv: ioqueue_recvfrom");
+	if (ioqueue_recvv(net->mcast, nitems(buf), buf, &from) < 0) {
+		warning("mcast_recv: ioqueue_recvv");
 		goto out;
 	}
 
@@ -860,8 +879,10 @@ net_send(int netfd, enum msg msg, const char *fmt, ...)
  ***************************************************************************/
 
 static void
-timeout(int UNUSED(dummy), struct net *net)
+timeout(int UNUSED(dummy), void *arg)
 {
+	struct net *net = (struct net *) arg;
+
 	switch (net->state) {
 	case STATE_ASKING_TOKEN:
 		mcast_send_msg(net, MSG_TOKEN_ASK, "");
@@ -895,7 +916,17 @@ timeout(int UNUSED(dummy), struct net *net)
 
 	/* can we do without at timeout? */
 	if (net->state >= STATE_WITHOUT_TIMEOUT)
-		ioevent_detach(net->state_ev);
+		ioevent_detach(net->timeout_ev);
+}
+
+static void
+speedup(int UNUSED(num), void *arg)
+{
+	struct net *net = (struct net *) arg;
+	uintptr_t rate;
+
+	ioqueue_get(net->mcast, &ioqueue_limit_send, &rate);
+	ioqueue_set(net->mcast, &ioqueue_limit_send, rate + (rate / 10));
 }
 
 
@@ -911,7 +942,7 @@ net_init(struct multifs *multifs)
 {
 	int fd[2];
 	struct net net;
-	struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+	struct timeval tv;
 
 	/* create the server socket */
 	memset(&net, '\0', sizeof(net));
@@ -939,7 +970,7 @@ net_init(struct multifs *multifs)
 		fatal(1, "pipe");
 
 	/* create the I/O loop */
-	net.ioloop = ioloop_alloc(IOEVENT_READ | IOEVENT_WRITE | IOEVENT_TIMER);
+	net.ioloop = ioloop_alloc(IOEVENT_READ | IOEVENT_WRITE | IOEVENT_TIMER | IOEVENT_FLAG);
 	if (net.ioloop == NULL)
 		fatal(1, "ioloop_alloc");
 
@@ -956,20 +987,29 @@ net_init(struct multifs *multifs)
 	if (net.mcast_send_ev == NULL)
 		fatal(1, "ioqueue_send_event");
 
-	net.state_ev = ioevent_timer(&tv, (ioevent_cb_t *) timeout, &net, 0);
-	if (net.state_ev == NULL)
+	tv = (struct timeval) { 2, 0 };
+	net.timeout_ev = ioevent_timer(&tv, timeout, &net, 0);
+	if (net.timeout_ev == NULL)
 		fatal(1, "ioevent_timer");
 
+	tv = (struct timeval) { 1, 0 };
 	net.resend_ev = ioevent_timer(&tv, (ioevent_cb_t *) mcast_recv_resend, &net, 0);
 	if (net.resend_ev == NULL)
+		fatal(1, "ioevent_timer");
+
+	tv = (struct timeval) { 10, 0 };
+	net.speedup_ev = ioevent_timer(&tv, speedup, &net, 0);
+	if (net.speedup_ev == NULL)
 		fatal(1, "ioevent_timer");
 
 	/* attach all */
 	if (ioevent_attach(net.fs_recv_ev, net.ioloop) < 0 ||
 	    ioevent_attach(net.mcast_recv_ev, net.ioloop) < 0 ||
 	    ioevent_attach(net.mcast_send_ev, net.ioloop) < 0 ||
-	    ioevent_attach(net.state_ev, net.ioloop) < 0 ||
-	    ioevent_attach(net.resend_ev, net.ioloop) < 0)
+	    ioevent_attach(net.timeout_ev, net.ioloop) < 0 ||
+	    ioevent_attach(net.resend_ev, net.ioloop) < 0 ||
+	    ioevent_attach(net.speedup_ev, net.ioloop) < 0 ||
+	    ioqueue_attach(net.mcast, net.ioloop) < 0)
 		fatal(1, "ioevent_attach");
 
 	switch (multifs->netpid = fork()) {
@@ -1006,7 +1046,8 @@ net_init(struct multifs *multifs)
 	mcast_send_msg(&net, MSG_TOKEN_WHERE, "");
 
 	/* process socket events */
-	ioloop_run(net.ioloop);
+	if (ioloop_run(net.ioloop) < 0)
+		warning("ioloop_run");
 
 	exit(0);
 }
