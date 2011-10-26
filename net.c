@@ -241,7 +241,7 @@ make_addr(const char *restrict name, size_t namelen, int port)
  * Get own address.
  */
 static struct ioendpoint *
-getmyaddr()
+getmyaddr(int port)
 {
 	struct ifaddrs *ifap, *i;
 	struct ioendpoint *endp = NULL;
@@ -250,19 +250,21 @@ getmyaddr()
 		fatal(1, "getifaddrs");
 
 	for (i = ifap; i != NULL; i = i->ifa_next) {
-		const struct in6_addr *addr;
+		struct sockaddr_in6 sin6;
 
 		/* skip non-IPv6 interfaces */
 		if (i->ifa_addr->sa_family != AF_INET6)
 			continue;
 
 		/* skip local addresses */
-		addr = &((struct sockaddr_in6 *) i->ifa_addr)->sin6_addr;
-		if (IN6_IS_ADDR_LOOPBACK(addr) || IN6_IS_ADDR_LINKLOCAL(addr))
+		sin6 = *(struct sockaddr_in6 *) i->ifa_addr;
+		if (IN6_IS_ADDR_LOOPBACK(&sin6.sin6_addr) ||
+		    IN6_IS_ADDR_LINKLOCAL(&sin6.sin6_addr))
 			continue;
 
 		/* get the address */
-		endp = ioendpoint_alloc_sockaddr(i->ifa_addr);
+		sin6.sin6_port = htons(port);
+		endp = ioendpoint_alloc_sockaddr((struct sockaddr *) &sin6);
 		if (endp == NULL)
 			fatal(1, "ioendpoint_alloc_sockaddr");
 
@@ -953,7 +955,7 @@ net_init(struct multifs *multifs)
 	net.multifs = multifs;
 	net.mcast = make_socket(NET_PORT);
 	net.sequence = UNKNOWN_SEQUENCE;
-	net.self = getmyaddr();
+	net.self = getmyaddr(NET_PORT);
 
 	/* set it to multicast */
 	net.multicast = make_addr(multifs->fsname, multifs->fsnamelen, NET_PORT);
