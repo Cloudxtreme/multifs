@@ -84,9 +84,9 @@ struct net {
 	struct ioevent		*fs_recv_ev,
 				*mcast_recv_ev,
 				*mcast_send_ev,
+				*mcast_purge_ev,
 				*timeout_ev,
-				*resend_ev,
-				*speedup_ev;
+				*resend_ev;
 	enum state		 state;
 	uint64_t		 sequence;
 	struct ioendpoint	*multicast,
@@ -189,16 +189,6 @@ make_socket(int port)
 		fatal(1, "ioqueue_alloc_socket(AF_INET6)");
 
 	ioendpoint_release(endp);
-
-	/* create rate-monitoring queue */
-	queue = ioqueue_alloc_rate(queue);
-	if (queue == NULL)
-		fatal(1, "ioqueue_alloc_rate");
-
-	/* create rate-limiting queue */
-	queue = ioqueue_alloc_limit(queue);
-	if (queue == NULL)
-		fatal(1, "ioqueue_alloc_limit");
 
 	return queue;
 }
@@ -349,10 +339,6 @@ mcast_send_queue(struct net *net, struct packet *packet)
 	else
 		LIST_INSERT_LAST(&net->sendq, packet, packetq);
 	net->sendqlen++;
-
-	/* should we throttle the fuse worker? */
-	if (net->sendqlen == MAXSENDQ)
-		ioevent_detach(net->fs_recv_ev);
 }
 
 /*
@@ -446,10 +432,6 @@ mcast_send(int UNUSED(dummy), struct net *net)
 	LIST_REMOVE_FIRST(&net->sendq, packetq);
 	net->sendqlen--;
 
-	/* does this mean the fuse worker can be re-enabled? */
-	if (net->sendqlen == MAXSENDQ - 1)
-		ioevent_attach(net->fs_recv_ev, net->ioloop);
-
 	assert(net->state == STATE_HAS_TOKEN || !needs_token(packet));
 
 	/* is the next packet a token grant? */
@@ -487,20 +469,36 @@ mcast_send(int UNUSED(dummy), struct net *net)
 	/* place the packet on the list of sent packets */
 	LIST_INSERT_LAST(&net->resendq, packet, packetq);
 	net->resendqlen++;
-	if (net->resendqlen > MAXSENDQ * 2) {
-		/* reduce queue length */
-		while (net->resendqlen > MAXSENDQ) {
-			packet = LIST_FIRST(&net->resendq, packetq);
-			LIST_REMOVE_FIRST(&net->resendq, packetq);
-			packet_free(packet);
-			net->resendqlen--;
-		}
-	}
+
+	/* disable the fuse worker when we have a lot going on */
+	if (net->resendqlen > MAXSENDQ * 2)
+		ioevent_detach(net->fs_recv_ev);
 
 	return;
 
 detach:
 	ioevent_detach(net->mcast_send_ev);
+}
+
+/*
+ * Purge the resend queue
+ */
+static void
+mcast_send_purge(int UNUSED(num), void *arg)
+{
+	struct net *net = (struct net *) arg;
+	struct packet *packet;
+
+	/* reduce queue length */
+	while (net->resendqlen > MAXSENDQ) {
+		packet = LIST_FIRST(&net->resendq, packetq);
+		LIST_REMOVE_FIRST(&net->resendq, packetq);
+		packet_free(packet);
+		net->resendqlen--;
+	}
+
+	/* re-enable the fuse worker */
+	ioevent_attach(net->fs_recv_ev, net->ioloop);
 }
 
 
@@ -569,17 +567,10 @@ mcast_recv_process(struct net *net, struct packet *packet)
 		/* check if we have the packet */
 		LIST_FOREACH(sent, &net->resendq, packetq) {
 			if (sent->sequence == sequence) {
-				uintptr_t rate;
-
 				/* resend this packet */
 				LIST_REMOVE(&net->resendq, sent, packetq);
 				net->resendqlen--;
 				mcast_send_queue(net, sent);
-
-				/* reduce the transmission rate so as to
-				 * keep up with slow peers */
-				ioqueue_get(net->mcast, &ioqueue_rate_send, &rate);
-				ioqueue_set(net->mcast, &ioqueue_limit_send, rate / 2);
 
 				break;
 			}
@@ -878,7 +869,12 @@ net_send(int netfd, enum msg msg, const char *fmt, ...)
 	vpack(iov[2].iov_base, len, fmt, ap);
 	va_end(ap);
 
-	return reliable_io(netfd, iov, nitems(iov), writev);
+	if (reliable_io(netfd, iov, nitems(iov), writev) < 0) {
+		warning("%s: reliable_io", __func__);
+		return -1;
+	}
+
+	return 0;
 }
 
 
@@ -925,16 +921,6 @@ timeout(int UNUSED(dummy), void *arg)
 	/* can we do without at timeout? */
 	if (net->state >= STATE_WITHOUT_TIMEOUT)
 		ioevent_detach(net->timeout_ev);
-}
-
-static void
-speedup(int UNUSED(num), void *arg)
-{
-	struct net *net = (struct net *) arg;
-	uintptr_t rate;
-
-	ioqueue_get(net->mcast, &ioqueue_limit_send, &rate);
-	ioqueue_set(net->mcast, &ioqueue_limit_send, rate + (rate / 10));
 }
 
 
@@ -995,6 +981,11 @@ net_init(struct multifs *multifs)
 	if (net.mcast_send_ev == NULL)
 		fatal(1, "ioqueue_send_event");
 
+	tv = (struct timeval) { 1, 0 };
+	net.mcast_purge_ev = ioevent_timer(&tv, mcast_send_purge, &net, 0);
+	if (net.mcast_purge_ev == NULL)
+		fatal(1, "ioevent_timer");
+
 	tv = (struct timeval) { 2, 0 };
 	net.timeout_ev = ioevent_timer(&tv, timeout, &net, 0);
 	if (net.timeout_ev == NULL)
@@ -1005,18 +996,13 @@ net_init(struct multifs *multifs)
 	if (net.resend_ev == NULL)
 		fatal(1, "ioevent_timer");
 
-	tv = (struct timeval) { 10, 0 };
-	net.speedup_ev = ioevent_timer(&tv, speedup, &net, 0);
-	if (net.speedup_ev == NULL)
-		fatal(1, "ioevent_timer");
-
 	/* attach all */
 	if (ioevent_attach(net.fs_recv_ev, net.ioloop) < 0 ||
 	    ioevent_attach(net.mcast_recv_ev, net.ioloop) < 0 ||
 	    ioevent_attach(net.mcast_send_ev, net.ioloop) < 0 ||
+	    ioevent_attach(net.mcast_purge_ev, net.ioloop) < 0 ||
 	    ioevent_attach(net.timeout_ev, net.ioloop) < 0 ||
 	    ioevent_attach(net.resend_ev, net.ioloop) < 0 ||
-	    ioevent_attach(net.speedup_ev, net.ioloop) < 0 ||
 	    ioqueue_attach(net.mcast, net.ioloop) < 0)
 		fatal(1, "ioevent_attach");
 
