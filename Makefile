@@ -1,4 +1,4 @@
-VERSION		= 0.1
+VERSION		= 0.2
 CFLAGS		+= -g -Wall -Wextra
 CPPFLAGS	+= $(shell pkg-config fuse --cflags) -DFUSE_USE_VERSION=26 \
 		   -D_XOPEN_SOURCE=500 -MMD -MP -DVERSION=\"$(VERSION)\" \
